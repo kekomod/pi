@@ -90,6 +90,11 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		this.rebuild();
 	}
 
+	override invalidate(): void {
+		this.nativeLayout = undefined;
+		super.invalidate();
+	}
+
 	addRegionPresentation(renderer: MessageRegionRenderer): () => void {
 		this.regionRenderers.add(renderer);
 		this.invalidate();
@@ -133,6 +138,7 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 	}
 
 	private rebuild(width?: number, resolvedText?: string): void {
+		this.nativeLayout = undefined;
 		this.clear();
 		for (const factory of this.leadingComponentFactories) {
 			try {
@@ -231,6 +237,10 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 	}
 
 	private resolveNativeRender(width: number): { readonly lines: string[]; readonly nativeWidth: number } {
+		const cached = this.nativeLayout;
+		if (cached?.outerWidth === width) {
+			return { lines: this.renderNative(cached.nativeWidth), nativeWidth: cached.nativeWidth };
+		}
 		const initial = this.renderNative(width);
 		let nativeWidth = width;
 		try {
@@ -246,6 +256,7 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		} catch {
 			// Keep the full-width native message when an optional resolver fails.
 		}
+		this.nativeLayout = { outerWidth: width, nativeWidth };
 		if (nativeWidth === width) return { lines: initial, nativeWidth };
 		return { lines: this.renderNative(nativeWidth), nativeWidth };
 	}
@@ -253,7 +264,9 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 	private padNativeLines(lines: readonly string[], width: number): string[] {
 		return lines.map((line) => {
 			const visible = visibleWidth(line);
-			return visible >= width ? truncateToWidth(line, width) : line + " ".repeat(width - visible);
+			return visible >= width
+				? truncateToWidth(line, width)
+				: line + theme.bg("userMessageBg", " ".repeat(width - visible));
 		});
 	}
 

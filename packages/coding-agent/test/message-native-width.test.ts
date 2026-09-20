@@ -50,6 +50,29 @@ describe("native message width reservation", () => {
 		expect(stripAnsi(lines.join("\n")).replace(/\s+/gu, " ")).toContain("reserve this width");
 	});
 
+	test("caches the width decision until native content is invalidated", () => {
+		initTheme("dark");
+		const component = new AssistantMessageComponent(
+			assistant("A long sentence must reserve this width before it wraps across the transcript."),
+		);
+		let probes = 0;
+		const resolver = ({ width, nativeLines }: { width: number; nativeLines: readonly string[] }) => {
+			probes += 1;
+			return reserveWhenLong(width, nativeLines);
+		};
+		component.setNativeRenderWidth(resolver);
+		const first = component.render(40);
+		const second = component.render(40);
+		expect(second).toEqual(first);
+		expect(probes).toBe(1);
+		component.invalidate();
+		component.render(40);
+		expect(probes).toBe(2);
+		component.setNativeRenderWidth(resolver);
+		component.render(40);
+		expect(probes).toBe(3);
+	});
+
 	test("keeps short messages at the original width and handles Unicode narrow layouts", () => {
 		initTheme("dark");
 		const short = new UserMessageComponent("short");
@@ -63,6 +86,15 @@ describe("native message width reservation", () => {
 		const lines = unicode.render(16);
 		expect(lines.length).toBeGreaterThan(0);
 		expect(lines.every((line) => visibleWidth(line) <= 16)).toBe(true);
+	});
+
+	test("uses the native user background when padding a reserved row", () => {
+		initTheme("dark");
+		const component = new UserMessageComponent("A long sentence must reserve this width.");
+		component.setNativeRenderWidth(({ width }) => width - 8);
+		const lines = component.render(40);
+		expect(lines.some((line) => line.includes("\x1b["))).toBe(true);
+		expect(lines.some((line) => line.includes("\x1b[49m"))).toBe(true);
 	});
 
 	test("passes the reserved width to native mouse layout", () => {

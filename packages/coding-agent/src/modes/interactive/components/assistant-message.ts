@@ -85,6 +85,7 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 	}
 
 	override invalidate(): void {
+		this.nativeLayout = undefined;
 		super.invalidate();
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
@@ -175,6 +176,10 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 	}
 
 	private resolveNativeRender(width: number): { readonly lines: string[]; readonly nativeWidth: number } {
+		const cached = this.nativeLayout;
+		if (cached?.outerWidth === width) {
+			return { lines: this.renderNative(cached.nativeWidth), nativeWidth: cached.nativeWidth };
+		}
 		const initial = this.renderNative(width);
 		let nativeWidth = width;
 		try {
@@ -190,6 +195,7 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 		} catch {
 			// Keep the full-width native message when an optional resolver fails.
 		}
+		this.nativeLayout = { outerWidth: width, nativeWidth };
 		if (nativeWidth === width) return { lines: initial, nativeWidth };
 		return { lines: this.renderNative(nativeWidth), nativeWidth };
 	}
@@ -229,6 +235,7 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 	}
 
 	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
+		this.nativeLayout = undefined;
 		this.lastMessage = message;
 		this.streaming = isStreaming;
 
