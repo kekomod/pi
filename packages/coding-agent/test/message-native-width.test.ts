@@ -56,21 +56,38 @@ describe("native message width reservation", () => {
 			assistant("A long sentence must reserve this width before it wraps across the transcript."),
 		);
 		let probes = 0;
+		let firstProbe: readonly string[] | undefined;
 		const resolver = ({ width, nativeLines }: { width: number; nativeLines: readonly string[] }) => {
 			probes += 1;
+			if (firstProbe === undefined) firstProbe = nativeLines;
+			else expect(nativeLines).toBe(firstProbe);
 			return reserveWhenLong(width, nativeLines);
 		};
 		component.setNativeRenderWidth(resolver);
 		const first = component.render(40);
 		const second = component.render(40);
 		expect(second).toEqual(first);
-		expect(probes).toBe(1);
+		expect(probes).toBe(2);
 		component.invalidate();
 		component.render(40);
-		expect(probes).toBe(2);
+		expect(probes).toBe(3);
 		component.setNativeRenderWidth(resolver);
 		component.render(40);
-		expect(probes).toBe(3);
+		expect(probes).toBe(4);
+	});
+
+	test("rechecks a changed reservation at the same width", () => {
+		initTheme("dark");
+		const component = new AssistantMessageComponent(
+			assistant("A long sentence must reserve this width before it wraps across the transcript."),
+		);
+		let reserve = true;
+		component.setNativeRenderWidth(({ width }) => (reserve ? width - 8 : undefined));
+		const narrowed = component.render(40);
+		reserve = false;
+		const full = component.render(40);
+		expect(full).not.toEqual(narrowed);
+		expect(full.every((line) => visibleWidth(line) <= 40)).toBe(true);
 	});
 
 	test("keeps short messages at the original width and handles Unicode narrow layouts", () => {

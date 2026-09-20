@@ -47,7 +47,11 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 	private leadingComponentFactories = new Set<MessageLeadingComponentFactory>();
 	private outputPadding?: MessageOutputPadding;
 	private nativeWidthResolver?: MessageNativeWidthResolver;
-	private nativeLayout?: { readonly outerWidth: number; readonly nativeWidth: number };
+	private nativeLayout?: {
+		readonly outerWidth: number;
+		readonly nativeWidth: number;
+		readonly probeLines: string[];
+	};
 
 	get message(): unknown {
 		return this.lastMessage;
@@ -177,10 +181,7 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 
 	private resolveNativeRender(width: number): { readonly lines: string[]; readonly nativeWidth: number } {
 		const cached = this.nativeLayout;
-		if (cached?.outerWidth === width) {
-			return { lines: this.renderNative(cached.nativeWidth), nativeWidth: cached.nativeWidth };
-		}
-		const initial = this.renderNative(width);
+		const initial = cached?.outerWidth === width ? cached.probeLines : this.renderNative(width);
 		let nativeWidth = width;
 		try {
 			const candidate = this.nativeWidthResolver?.({
@@ -195,7 +196,7 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 		} catch {
 			// Keep the full-width native message when an optional resolver fails.
 		}
-		this.nativeLayout = { outerWidth: width, nativeWidth };
+		this.nativeLayout = { outerWidth: width, nativeWidth, probeLines: initial };
 		if (nativeWidth === width) return { lines: initial, nativeWidth };
 		return { lines: this.renderNative(nativeWidth), nativeWidth };
 	}
@@ -210,7 +211,6 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 	override render(width: number): string[] {
 		this.applyOutputPadding(width);
 		const native = this.resolveNativeRender(width);
-		this.nativeLayout = { outerWidth: width, nativeWidth: native.nativeWidth };
 		let lines = native.nativeWidth === width ? native.lines : this.padNativeLines(native.lines, width);
 		for (const projection of this.projections) {
 			try {
