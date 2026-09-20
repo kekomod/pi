@@ -1,5 +1,5 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { Container, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
@@ -28,6 +28,30 @@ function assistant(text: string): AssistantMessage {
 
 function reserveWhenLong(width: number, nativeLines: readonly string[]): number | undefined {
 	return nativeLines.join(" ").replace(/\s+/gu, " ").includes("reserve this width") ? width - 8 : undefined;
+}
+
+class WidthObserver extends Container {
+	readonly renderWidths: number[] = [];
+	readonly mouseWidths: number[] = [];
+
+	override render(width: number): string[] {
+		this.renderWidths.push(width);
+		return ["link".padEnd(width)];
+	}
+
+	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		this.mouseWidths.push(event.width);
+		return {
+			handled: true,
+			target: {
+				component: this,
+				originX: event.screenX - event.x,
+				originY: event.screenY - event.y,
+				width: event.width,
+				height: event.height,
+			},
+		};
+	}
 }
 
 describe("native message width reservation", () => {
@@ -88,6 +112,46 @@ describe("native message width reservation", () => {
 		const full = component.render(40);
 		expect(full).not.toEqual(narrowed);
 		expect(full.every((line) => visibleWidth(line) <= 40)).toBe(true);
+	});
+
+	test("rebuilds native geometry when a reservation expands at the same width", () => {
+		initTheme("dark");
+		const observer = new WidthObserver();
+		const component = new AssistantMessageComponent(assistant("answer"));
+		component.addLeadingComponent(() => observer);
+		let reserve = true;
+		component.setNativeRenderWidth(({ width }) => (reserve ? width - 8 : undefined));
+		const narrowed = component.render(40);
+		reserve = false;
+		const full = component.render(40);
+		expect(narrowed.length).toBeGreaterThan(0);
+		expect(full.length).toBeGreaterThan(0);
+		expect(observer.renderWidths.slice(-2)).toEqual([32, 40]);
+		component.handleMouse({
+			type: "click",
+			button: "left",
+			x: 1,
+			y: 1,
+			screenX: 1,
+			screenY: 1,
+			width: 40,
+			height: full.length,
+			shift: false,
+			alt: false,
+			ctrl: false,
+			clickCount: 1,
+		});
+		expect(observer.mouseWidths).toEqual([40]);
+	});
+
+	test("keeps uncoupled native rendering live on repeated frames", () => {
+		initTheme("dark");
+		const observer = new WidthObserver();
+		const component = new AssistantMessageComponent(assistant("answer"));
+		component.addLeadingComponent(() => observer);
+		component.render(40);
+		component.render(40);
+		expect(observer.renderWidths.slice(-2)).toEqual([40, 40]);
 	});
 
 	test("keeps short messages at the original width and handles Unicode narrow layouts", () => {

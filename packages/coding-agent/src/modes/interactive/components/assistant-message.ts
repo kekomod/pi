@@ -180,11 +180,16 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 	}
 
 	private resolveNativeRender(width: number): { readonly lines: string[]; readonly nativeWidth: number } {
+		const resolver = this.nativeWidthResolver;
+		if (!resolver) {
+			return { lines: this.renderNative(width), nativeWidth: width };
+		}
 		const cached = this.nativeLayout;
-		const initial = cached?.outerWidth === width ? cached.probeLines : this.renderNative(width);
+		const sameWidth = cached?.outerWidth === width;
+		const initial = sameWidth ? cached.probeLines : this.renderNative(width);
 		let nativeWidth = width;
 		try {
-			const candidate = this.nativeWidthResolver?.({
+			const candidate = resolver({
 				role: this.role,
 				message: this.message,
 				isStreaming: this.isStreaming,
@@ -197,7 +202,11 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 			// Keep the full-width native message when an optional resolver fails.
 		}
 		this.nativeLayout = { outerWidth: width, nativeWidth, probeLines: initial };
-		if (nativeWidth === width) return { lines: initial, nativeWidth };
+		if (sameWidth && cached && cached.nativeWidth === nativeWidth) {
+			if (nativeWidth === width) return { lines: initial, nativeWidth };
+			return { lines: this.renderNative(nativeWidth), nativeWidth };
+		}
+		if (nativeWidth === width && !sameWidth) return { lines: initial, nativeWidth };
 		return { lines: this.renderNative(nativeWidth), nativeWidth };
 	}
 
