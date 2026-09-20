@@ -176,9 +176,9 @@ import {
 	theme,
 } from "./theme/theme.ts";
 import { InteractiveThemeController } from "./theme/theme-controller.ts";
-import { createInteractiveTui, createInteractiveTuiReference } from "./tui-renderer.ts";
+import { createInteractiveTui, createInteractiveTuiReference, rebindInteractiveTuiReference } from "./tui-renderer.ts";
 
-export { createInteractiveTui, createInteractiveTuiReference } from "./tui-renderer.ts";
+export { createInteractiveTui, createInteractiveTuiReference, rebindInteractiveTuiReference } from "./tui-renderer.ts";
 
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
@@ -844,6 +844,7 @@ export class InteractiveMode {
 		this.mountInteractiveTui(nextUi, components);
 		nextUi.invalidate();
 		nextUi.setFocus(focus);
+		rebindInteractiveTuiReference(this.ui);
 		if (!startRenderer) return true;
 		nextUi.start();
 		this.themeController.rebindTui();
