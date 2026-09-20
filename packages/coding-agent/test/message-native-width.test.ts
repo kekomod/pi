@@ -33,10 +33,11 @@ function reserveWhenLong(width: number, nativeLines: readonly string[]): number 
 class WidthObserver extends Container {
 	readonly renderWidths: number[] = [];
 	readonly mouseWidths: number[] = [];
+	text = "link";
 
 	override render(width: number): string[] {
 		this.renderWidths.push(width);
-		return ["link".padEnd(width)];
+		return [this.text.padEnd(width)];
 	}
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
@@ -87,7 +88,7 @@ describe("native message width reservation", () => {
 			else expect(nativeLines).toBe(firstProbe);
 			return reserveWhenLong(width, nativeLines);
 		};
-		component.setNativeRenderWidth(resolver);
+		component.setNativeRenderWidth(resolver, { cacheProbe: true });
 		const first = component.render(40);
 		const second = component.render(40);
 		expect(second).toEqual(first);
@@ -95,7 +96,7 @@ describe("native message width reservation", () => {
 		component.invalidate();
 		component.render(40);
 		expect(probes).toBe(3);
-		component.setNativeRenderWidth(resolver);
+		component.setNativeRenderWidth(resolver, { cacheProbe: true });
 		component.render(40);
 		expect(probes).toBe(4);
 	});
@@ -152,6 +153,41 @@ describe("native message width reservation", () => {
 		component.render(40);
 		component.render(40);
 		expect(observer.renderWidths.slice(-2)).toEqual([40, 40]);
+	});
+
+	test("keeps dynamic native children live when probe caching is not requested", () => {
+		initTheme("dark");
+		const observer = new WidthObserver();
+		const component = new AssistantMessageComponent(assistant("answer"));
+		component.addLeadingComponent(() => observer);
+		component.setNativeRenderWidth(() => undefined);
+
+		observer.text = "first frame";
+		const first = stripAnsi(component.render(40).join("\n"));
+		observer.text = "second frame";
+		const second = stripAnsi(component.render(40).join("\n"));
+
+		expect(first).toContain("first frame");
+		expect(second).toContain("second frame");
+		expect(observer.renderWidths.slice(-2)).toEqual([40, 40]);
+	});
+
+	test("measures changed native children before resolving a reduced width", () => {
+		initTheme("dark");
+		const observer = new WidthObserver();
+		const component = new AssistantMessageComponent(assistant("answer"));
+		component.addLeadingComponent(() => observer);
+		component.setNativeRenderWidth(({ width, nativeLines }) =>
+			nativeLines.join(" ").includes("reserve this width") ? width - 8 : undefined,
+		);
+
+		observer.text = "reserve this width";
+		component.render(40);
+		observer.text = "no reservation";
+		const full = stripAnsi(component.render(40).join("\n"));
+
+		expect(full).toContain("no reservation");
+		expect(observer.renderWidths.slice(-3)).toEqual([40, 32, 40]);
 	});
 
 	test("keeps short messages at the original width and handles Unicode narrow layouts", () => {

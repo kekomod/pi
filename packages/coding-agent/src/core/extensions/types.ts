@@ -177,6 +177,17 @@ export interface MessageNativeWidthContext {
 /** Return the width for a second native render, or undefined to keep the full width. */
 export type MessageNativeWidthResolver = (context: MessageNativeWidthContext) => number | undefined;
 
+/**
+ * Controls native probe caching for a width resolver.
+ *
+ * Probe caching is opt in because native leading components can update without
+ * notifying their parent message. Callers that cache probes must invalidate the
+ * message whenever any native child changes.
+ */
+export interface MessageNativeWidthOptions {
+	readonly cacheProbe?: boolean;
+}
+
 export interface MessageLeadingComponentContext {
 	readonly role: MessagePresentationRole;
 	readonly message: unknown;
@@ -197,7 +208,7 @@ export interface MessagePresentationTargetBase {
 	/** Resolve message padding before native components render at a given width. */
 	setOutputPadding(padding: MessageOutputPadding | undefined): void;
 	/** Resolve a narrower native render width; Pi pads the native rows and keeps hit testing aligned. */
-	setNativeRenderWidth(resolver: MessageNativeWidthResolver | undefined): void;
+	setNativeRenderWidth(resolver: MessageNativeWidthResolver | undefined, options?: MessageNativeWidthOptions): void;
 	/** Add a component before the native message content, preserving component geometry. */
 	addLeadingComponent(factory: MessageLeadingComponentFactory): () => void;
 }

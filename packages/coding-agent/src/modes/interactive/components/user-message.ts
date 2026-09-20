@@ -13,6 +13,7 @@ import type {
 	MarkdownTransformer,
 	MessageLeadingComponentContext,
 	MessageLeadingComponentFactory,
+	MessageNativeWidthOptions,
 	MessageNativeWidthResolver,
 	MessageOutputPadding,
 	MessagePresentationContext,
@@ -55,6 +56,7 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 	private leadingComponentFactories = new Set<MessageLeadingComponentFactory>();
 	private outputPadding?: MessageOutputPadding;
 	private nativeWidthResolver?: MessageNativeWidthResolver;
+	private cacheNativeProbe = false;
 	private nativeLayout?: {
 		readonly outerWidth: number;
 		readonly nativeWidth: number;
@@ -112,8 +114,12 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		this.invalidate();
 	}
 
-	setNativeRenderWidth(resolver: MessageNativeWidthResolver | undefined): void {
+	setNativeRenderWidth(
+		resolver: MessageNativeWidthResolver | undefined,
+		options: MessageNativeWidthOptions = {},
+	): void {
 		this.nativeWidthResolver = resolver;
+		this.cacheNativeProbe = options.cacheProbe === true;
 		this.invalidate();
 	}
 
@@ -245,7 +251,7 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		if (!resolver) {
 			return { lines: this.renderNative(width), nativeWidth: width };
 		}
-		const cached = this.nativeLayout;
+		const cached = this.cacheNativeProbe ? this.nativeLayout : undefined;
 		const sameWidth = cached?.outerWidth === width;
 		const initial = sameWidth ? cached.probeLines : this.renderNative(width);
 		let nativeWidth = width;
