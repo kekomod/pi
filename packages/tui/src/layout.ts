@@ -246,7 +246,12 @@ function layoutComponent(
 	return box;
 }
 
-function replaceScrollbarCell(
+const MAX_SCROLLBAR_CACHE_ENTRIES = 1024;
+const MAX_SCROLLBAR_CACHE_BYTES = 2 * 1024 * 1024;
+const scrollbarCells = new Map<string, string>();
+let scrollbarCellBytes = 0;
+
+function replaceScrollbarCellUncached(
 	line: string,
 	column: number,
 	totalWidth: number,
@@ -275,6 +280,46 @@ function replaceScrollbarCell(
 	const cellPaddingAfter = " ".repeat(Math.max(0, end - column - 1));
 	const targetStyle = `\x1b[0m\x1b]8;;\x07${preserveTargetBackground ? getActiveBackgroundAnsi(targetPrefix) : ""}`;
 	return `${before}${beforePadding}${targetStyle}${cellPaddingBefore}${replacement}${cellPaddingAfter}${after}`;
+}
+
+function replaceScrollbarCell(
+	line: string,
+	column: number,
+	totalWidth: number,
+	replacement: string,
+	preserveTargetBackground: boolean,
+): string {
+	if (isImageLine(line)) return line;
+	const key = JSON.stringify([line, column, totalWidth, replacement, preserveTargetBackground]);
+	const found = scrollbarCells.get(key);
+	if (found !== undefined) {
+		scrollbarCells.delete(key);
+		scrollbarCells.set(key, found);
+		return found;
+	}
+
+	const result = replaceScrollbarCellUncached(line, column, totalWidth, replacement, preserveTargetBackground);
+	const bytes = 2 * (key.length + result.length);
+	if (bytes > MAX_SCROLLBAR_CACHE_BYTES) return result;
+
+	while (
+		scrollbarCells.size >= MAX_SCROLLBAR_CACHE_ENTRIES ||
+		scrollbarCellBytes + bytes > MAX_SCROLLBAR_CACHE_BYTES
+	) {
+		const oldest = scrollbarCells.keys().next().value;
+		if (oldest === undefined) break;
+		const oldestValue = scrollbarCells.get(oldest);
+		if (oldestValue !== undefined) scrollbarCellBytes -= 2 * (oldest.length + oldestValue.length);
+		scrollbarCells.delete(oldest);
+	}
+	scrollbarCells.set(key, result);
+	scrollbarCellBytes += bytes;
+	return result;
+}
+
+/** @internal Exposes bounded-cache counters for package regression tests. */
+export function getScrollbarCellCacheStats(): { entries: number; bytes: number } {
+	return { entries: scrollbarCells.size, bytes: scrollbarCellBytes };
 }
 
 export function getScrollbarGeometry(box: LayoutBox, includeHiddenAuto = false): ScrollbarGeometry | undefined {

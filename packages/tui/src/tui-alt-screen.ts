@@ -44,6 +44,8 @@ import {
 	type TuiMouseDispatchTarget,
 	type TuiMouseEvent,
 	type TuiStopOptions,
+	type TuiViewportInputListener,
+	type TuiViewportRenderHook,
 	VIEWPORT_TUI,
 	type ViewportTUI,
 } from "./tui.ts";
@@ -234,7 +236,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		x: number;
 		y: number;
 	};
-	private readonly wheelScrollLines: number;
+	private wheelScrollLines: number;
 	private readonly mouseEnabled: boolean;
 	private readonly searchMatchStyle: (text: string) => string;
 	private readonly searchCurrentMatchStyle: (text: string) => string;
@@ -244,6 +246,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly onRightClickPaste?: () => void;
 	private copyOnSelect: boolean;
 	private readonly copySelection?: (text: string) => Promise<boolean>;
+	private readonly viewportInputListeners = new Set<TuiViewportInputListener>();
+	private readonly viewportRenderHooks = new Set<TuiViewportRenderHook>();
 
 	constructor(
 		terminal: Terminal,
@@ -307,6 +311,20 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.layoutRoot = component;
 		this.currentLayout = undefined;
 		this.requestRender();
+	}
+
+	setWheelScrollLines(lines: number): void {
+		this.wheelScrollLines = Number.isFinite(lines) ? Math.max(1, Math.floor(lines)) : 1;
+	}
+
+	addViewportInputListener(listener: TuiViewportInputListener): () => void {
+		this.viewportInputListeners.add(listener);
+		return () => this.viewportInputListeners.delete(listener);
+	}
+
+	addViewportRenderHook(listener: TuiViewportRenderHook): () => void {
+		this.viewportRenderHooks.add(listener);
+		return () => this.viewportRenderHooks.delete(listener);
 	}
 
 	override render(width: number): string[] {
@@ -654,6 +672,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
+		for (const listener of this.viewportInputListeners) listener(data);
 		if (data === FOCUS_OUT) {
 			const hadActiveSelection = this.selectionPressActive;
 			const hadNonEmptyActiveSelection = hadActiveSelection && this.getSelectionBounds() !== undefined;
@@ -1661,6 +1680,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		let screen = nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
 		screen = this.applySearchHighlights(screen, nextLayout);
 		screen = this.compositeScrollToEndIndicator(screen, nextLayout, width);
+		for (const hook of this.viewportRenderHooks) {
+			const nextScreen = hook(screen, nextLayout, width);
+			if (nextScreen !== undefined) screen = nextScreen;
+		}
 		screen = this.compositeOverlays(screen, width, height);
 		if (screen.length > height) screen = screen.slice(screen.length - height);
 		screen = this.applySelection(screen, nextLayout);
@@ -1678,6 +1701,23 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			(line, row) =>
 				line !== this.previousScreen[row] && (isImageLine(line) || isImageLine(this.previousScreen[row] ?? "")),
 		);
+		const changedImageIds = new Set<number>();
+		let localKittyDamage = imagesNeedRedraw && this.imageProtocol === "kitty";
+		if (localKittyDamage) {
+			for (let row = 0; row < Math.max(screen.length, this.previousScreen.length); row++) {
+				const changed = screen[row] !== this.previousScreen[row];
+				const candidates = changed ? [this.previousScreen[row] ?? "", screen[row] ?? ""] : [screen[row] ?? ""];
+				for (const line of candidates) {
+					if (!isImageLine(line)) continue;
+					const placement = getKittyImagePlacement(line);
+					const secondPlacement = placement
+						? placement.replacementLine.indexOf("\x1b_G", placement.replacementLine.indexOf("\x1b_G") + 4)
+						: -1;
+					if (!placement || secondPlacement >= 0) localKittyDamage = false;
+					else if (changed) changedImageIds.add(placement.imageId);
+				}
+			}
+		}
 		const redrawImages = fullRedraw || imagesNeedRedraw;
 		const hadUploadedKittyImages = this.uploadedKittyImages.size > 0;
 		const preparedKittyScreen =
@@ -1695,12 +1735,25 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			buffer += `${clearImages}\x1b[2J`;
 		} else if (imagesNeedRedraw) {
 			if (this.imageProtocol === "iterm2") buffer += "\x1b[2J";
-			else if (this.imageProtocol === "kitty") buffer += deleteAllKittyPlacements();
+			else if (this.imageProtocol === "kitty") {
+				if (localKittyDamage) {
+					for (const imageId of changedImageIds) buffer += `\x1b_Ga=d,d=i,i=${imageId},q=2\x1b\\`;
+				} else buffer += deleteAllKittyPlacements();
+			}
 		}
 		buffer += preparedKittyScreen.evictedImageDeletion;
 
 		for (let row = 0; row < height; row++) {
-			if (!fullRedraw && !imagesNeedRedraw && screen[row] === this.previousScreen[row]) continue;
+			const imageDamaged =
+				localKittyDamage && changedImageIds.has(getKittyImagePlacement(screen[row] ?? "")?.imageId ?? -1);
+			if (
+				!fullRedraw &&
+				(!imagesNeedRedraw || localKittyDamage) &&
+				!imageDamaged &&
+				screen[row] === this.previousScreen[row]
+			) {
+				continue;
+			}
 			buffer += `\x1b[${row + 1};1H\x1b[2K${preparedKittyScreen.lines[row] ?? ""}`;
 		}
 

@@ -1031,7 +1031,7 @@ describe("TuiAltScreen", () => {
 				.map((event) => event.data)
 				.join("");
 			const placementIndex = redrawWrites.indexOf("\x1b_Ga=p,q=2");
-			assert.ok(redrawWrites.includes("\x1b_Ga=d,d=a,q=2\x1b\\"));
+			assert.match(redrawWrites, /\x1b_Ga=d,d=i,i=\d+,q=2\x1b\\/);
 			assert.ok(placementIndex > redrawWrites.indexOf("changed"));
 			assert.ok(!redrawWrites.includes("\x1b_Ga=T"));
 			assert.ok(redrawWrites.length < 2000, `expected placement-only redraw, got ${redrawWrites.length} bytes`);
