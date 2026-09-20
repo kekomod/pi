@@ -90,6 +90,23 @@ describe("Markdown component", () => {
 			assert.ok(lines.some((line) => line.includes("const value = 1;")));
 		});
 
+		it("allows native token rendering with a transformed heading", () => {
+			const source = "### Heading with enough words to wrap across rows";
+			const expected = new Markdown("## Heading with enough words to wrap across rows", 0, 0, defaultMarkdownTheme)
+				.render(24)
+				.map(stripAnsi);
+			let sawHeading = false;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme, undefined, {
+				renderToken: ({ token, renderNative }) => {
+					if (token.type !== "heading") return renderNative();
+					sawHeading = true;
+					return renderNative({ ...token, depth: 2 });
+				},
+			});
+			assert.deepStrictEqual(markdown.render(24).map(stripAnsi), expected);
+			assert.ok(sawHeading);
+		});
+
 		it("allows table rows to be projected while retaining native cell rendering", () => {
 			let tableCalls = 0;
 			const markdown = new Markdown(

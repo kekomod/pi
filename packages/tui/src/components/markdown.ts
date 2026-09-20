@@ -223,7 +223,7 @@ export interface MarkdownTokenRenderContext {
 	readonly width: number;
 	readonly nextTokenType?: string;
 	/** Render the token using Pi's parser, highlighting, wrapping, and theme. */
-	readonly renderNative: () => string[];
+	readonly renderNative: (token?: Token) => string[];
 }
 
 /** Context passed to a table presentation hook. */
@@ -484,7 +484,8 @@ export class Markdown implements Component {
 		nextTokenType?: string,
 		styleContext?: InlineStyleContext,
 	): string[] {
-		const renderNative = () => this.renderTokenNative(token, width, nextTokenType, styleContext);
+		const renderNative = (nativeToken: Token = token) =>
+			this.renderTokenNative(nativeToken, width, nextTokenType, styleContext);
 		try {
 			return this.options.renderToken?.({ token, width, nextTokenType, renderNative }) ?? renderNative();
 		} catch {
