@@ -3314,7 +3314,7 @@ export class InteractiveMode {
 									{
 										showImages: this.settingsManager.getShowImages(),
 										imageWidthCells: this.settingsManager.getImageWidthCells(),
-										imagePresentation: this.toolImagePresentations.get(content.name),
+										imagePresentation: this.toolImagePresentations?.get(content.name),
 									},
 									this.getRegisteredToolDefinition(content.name),
 									this.ui,
@@ -3390,7 +3390,7 @@ export class InteractiveMode {
 						{
 							showImages: this.settingsManager.getShowImages(),
 							imageWidthCells: this.settingsManager.getImageWidthCells(),
-							imagePresentation: this.toolImagePresentations.get(event.toolName),
+							imagePresentation: this.toolImagePresentations?.get(event.toolName),
 						},
 						this.getRegisteredToolDefinition(event.toolName),
 						this.ui,
@@ -3595,7 +3595,7 @@ export class InteractiveMode {
 	 * we update the previous status line instead of appending new ones to avoid log spam.
 	 */
 	private showStatus(message: string): void {
-		for (const filter of this.statusFilters.values()) {
+		for (const filter of this.statusFilters?.values() ?? []) {
 			try {
 				if (!filter(message)) return;
 			} catch {
@@ -3806,7 +3806,7 @@ export class InteractiveMode {
 							{
 								showImages: this.settingsManager.getShowImages(),
 								imageWidthCells: this.settingsManager.getImageWidthCells(),
-								imagePresentation: this.toolImagePresentations.get(content.name),
+								imagePresentation: this.toolImagePresentations?.get(content.name),
 							},
 							this.getRegisteredToolDefinition(content.name),
 							this.ui,
