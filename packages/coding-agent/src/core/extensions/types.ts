@@ -122,6 +122,67 @@ export interface WorkingIndicatorOptions {
 	intervalMs?: number;
 }
 
+/** The two transcript message kinds that expose presentation projections. */
+export type MessagePresentationRole = "user" | "assistant";
+
+/** A narrow view of a rendered transcript message. */
+export interface MessagePresentationTarget {
+	readonly role: MessagePresentationRole;
+	readonly message: unknown;
+	readonly isStreaming: boolean;
+	/** Add a projection after the native message renderer. Returns its disposer. */
+	addRenderProjection(projection: MessageRenderProjection): () => void;
+}
+
+/**
+ * Transform the rows produced by the native message component.
+ * Returning undefined keeps the rows unchanged. Projections run in registration order.
+ */
+export type MessageRenderProjection = (context: {
+	readonly role: MessagePresentationRole;
+	readonly message: unknown;
+	readonly isStreaming: boolean;
+	readonly width: number;
+	readonly nativeLines: readonly string[];
+}) => string[] | undefined;
+
+/** Factory used by the interactive transcript to attach a message projection. */
+export type MessagePresentationFactory = (target: MessagePresentationTarget) => void;
+
+/** Associates an extension entry with the most recent compatible transcript message. Return true to consume the entry. */
+export type MessageEntryAssociation = (
+	target: MessagePresentationTarget,
+	entry: CustomEntry<unknown>,
+) => boolean | undefined;
+
+export interface ToolImageBounds {
+	readonly width: number;
+	readonly height: number;
+}
+
+/** Context for transforming one tool-result image's terminal rows. */
+export interface ToolImageRenderContext {
+	readonly index: number;
+	readonly width: number;
+	readonly expanded: boolean;
+	readonly hasOverlay: boolean;
+	readonly nativeLines: readonly string[];
+	readonly bounds: ToolImageBounds;
+	readonly setExpanded: (expanded: boolean) => void;
+}
+
+/** Presentation hooks for tool-result images. The native Image component remains the source of rows. */
+export interface ToolImagePresentation {
+	/** Limit preview image height while the tool output is collapsed. */
+	readonly previewHeightCells?: number;
+	/** Transform image rows, for example to add an indentation gutter or hide them under an overlay. */
+	readonly render?: (context: ToolImageRenderContext) => string[] | undefined;
+	/** Handle a click in image-local coordinates. Return true when the event was consumed. */
+	readonly onClick?: (
+		context: ToolImageRenderContext & { readonly x: number; readonly y: number },
+	) => boolean | undefined;
+}
+
 /** Wrap the current autocomplete provider with additional behavior. */
 export type AutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider;
 export type EditorFactory = (tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => EditorComponent;
@@ -281,6 +342,21 @@ export interface ExtensionUIContext {
 
 	/** Set tool output expansion state. */
 	setToolsExpanded(expanded: boolean): void;
+
+	/**
+	 * Attach a typed row projection to user and assistant transcript messages.
+	 * This is available in interactive TUI mode; other modes may omit it.
+	 */
+	setMessagePresentation?: (key: string, factory: MessagePresentationFactory | undefined) => void;
+
+	/** Associate a custom session entry with the most recent transcript message of its kind. */
+	setMessageEntryAssociation?: (customType: string, association: MessageEntryAssociation | undefined) => void;
+
+	/** Filter status rows before they are added to the transcript. Return false to suppress a row. */
+	setStatusFilter?: (key: string, filter: ((message: string) => boolean) | undefined) => void;
+
+	/** Configure image row presentation for all executions of a tool name. */
+	setToolImagePresentation?: (toolName: string, presentation: ToolImagePresentation | undefined) => void;
 }
 
 // ============================================================================

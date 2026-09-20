@@ -217,6 +217,29 @@ export interface MarkdownTheme {
 	codeBlockIndent?: string;
 }
 
+/** Context passed to a block-token presentation hook. */
+export interface MarkdownTokenRenderContext {
+	readonly token: Token;
+	readonly width: number;
+	readonly nextTokenType?: string;
+	/** Render the token using Pi's parser, highlighting, wrapping, and theme. */
+	readonly renderNative: () => string[];
+}
+
+/** Context passed to a table presentation hook. */
+export interface MarkdownTableRenderContext {
+	readonly token: Tokens.Table;
+	readonly width: number;
+	readonly nextTokenType?: string;
+	/** Render the table using Pi's width-aware native table layout. */
+	readonly renderNative: () => string[];
+	/** Render inline cell tokens with the active Markdown style context. */
+	readonly renderInlineTokens: (tokens: readonly Token[]) => string;
+}
+
+export type MarkdownTokenRenderer = (context: MarkdownTokenRenderContext) => string[] | undefined;
+export type MarkdownTableRenderer = (context: MarkdownTableRenderContext) => string[] | undefined;
+
 export interface MarkdownOptions {
 	/** Preserve source list markers instead of normalizing them. */
 	preserveOrderedListMarkers?: boolean;
@@ -226,6 +249,10 @@ export interface MarkdownOptions {
 	transform?: (markdown: string, availableWidth: number) => string;
 	/** Render supported LaTeX math expressions as Unicode text (default: true). */
 	renderLatex?: boolean;
+	/** Customize a block token while retaining access to the native renderer. */
+	renderToken?: MarkdownTokenRenderer;
+	/** Customize table presentation while retaining native parsing and cell rendering. */
+	renderTable?: MarkdownTableRenderer;
 }
 
 interface InlineStyleContext {
@@ -457,6 +484,20 @@ export class Markdown implements Component {
 		nextTokenType?: string,
 		styleContext?: InlineStyleContext,
 	): string[] {
+		const renderNative = () => this.renderTokenNative(token, width, nextTokenType, styleContext);
+		try {
+			return this.options.renderToken?.({ token, width, nextTokenType, renderNative }) ?? renderNative();
+		} catch {
+			return renderNative();
+		}
+	}
+
+	private renderTokenNative(
+		token: Token,
+		width: number,
+		nextTokenType?: string,
+		styleContext?: InlineStyleContext,
+	): string[] {
 		const lines: string[] = [];
 
 		switch (token.type) {
@@ -631,7 +672,7 @@ export class Markdown implements Component {
 		return lines;
 	}
 
-	private renderInlineTokens(tokens: Token[], styleContext?: InlineStyleContext): string {
+	private renderInlineTokens(tokens: readonly Token[], styleContext?: InlineStyleContext): string {
 		let result = "";
 		const resolvedStyleContext = styleContext ?? this.getDefaultInlineStyleContext();
 		const { applyText, stylePrefix } = resolvedStyleContext;
@@ -840,6 +881,28 @@ export class Markdown implements Component {
 	 * Cells that don't fit are wrapped to multiple lines.
 	 */
 	private renderTable(
+		token: Tokens.Table,
+		availableWidth: number,
+		nextTokenType?: string,
+		styleContext?: InlineStyleContext,
+	): string[] {
+		const renderNative = () => this.renderTableNative(token, availableWidth, nextTokenType, styleContext);
+		try {
+			return (
+				this.options.renderTable?.({
+					token,
+					width: availableWidth,
+					nextTokenType,
+					renderNative,
+					renderInlineTokens: (tokens) => this.renderInlineTokens(tokens, styleContext),
+				}) ?? renderNative()
+			);
+		} catch {
+			return renderNative();
+		}
+	}
+
+	private renderTableNative(
 		token: Tokens.Table,
 		availableWidth: number,
 		nextTokenType?: string,

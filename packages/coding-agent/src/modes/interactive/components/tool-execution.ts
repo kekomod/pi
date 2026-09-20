@@ -10,8 +10,15 @@ import {
 	Text,
 	type TUI,
 	type TuiMouseEvent,
+	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import type { ToolDefinition, ToolRenderContext, ToolRenderResultOptions } from "../../../core/extensions/types.ts";
+import type {
+	ToolDefinition,
+	ToolImagePresentation,
+	ToolImageRenderContext,
+	ToolRenderContext,
+	ToolRenderResultOptions,
+} from "../../../core/extensions/types.ts";
 import type { Theme } from "../theme/theme.ts";
 
 /**
@@ -39,12 +46,43 @@ import { keyHint } from "./keybinding-hints.ts";
 
 const FALLBACK_PREVIEW_LINES = 10;
 
+interface ToolImageHost {
+	renderPresentedImage(image: Image, index: number, width: number): string[];
+	handlePresentedImageMouse(index: number, event: TuiMouseEvent): TuiMouseEventResult | undefined;
+}
+
+/** Keeps image presentation in the normal Component tree for both shell modes. */
+class ToolImageView implements Component {
+	private readonly host: ToolImageHost;
+	private readonly image: Image;
+	private readonly index: number;
+
+	constructor(host: ToolImageHost, image: Image, index: number) {
+		this.host = host;
+		this.image = image;
+		this.index = index;
+	}
+
+	render(width: number): string[] {
+		return this.host.renderPresentedImage(this.image, this.index, width);
+	}
+
+	invalidate(): void {
+		this.image.invalidate();
+	}
+
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		return this.host.handlePresentedImageMouse(this.index, event);
+	}
+}
+
 export interface ToolExecutionOptions {
 	showImages?: boolean;
 	imageWidthCells?: number;
+	imagePresentation?: ToolImagePresentation;
 }
 
-export class ToolExecutionComponent extends Container {
+export class ToolExecutionComponent extends Container implements ToolImageHost {
 	private contentBox: Box;
 	private contentText: Text;
 	private contentTextRegion: MouseRegion;
@@ -54,7 +92,11 @@ export class ToolExecutionComponent extends Container {
 	private resultRendererComponent?: Component;
 	private rendererState: any = {};
 	private imageComponents: Image[] = [];
+	private imageViews: ToolImageView[] = [];
 	private imageSpacers: Spacer[] = [];
+	private imagePresentation?: ToolImagePresentation;
+	private imageFrames = new Map<number, { context: ToolImageRenderContext; lines: string[] }>();
+	private imageLayout: Array<{ index: number; startY: number; height: number }> = [];
 	private toolName: string;
 	private toolCallId: string;
 	private args: any;
@@ -91,6 +133,7 @@ export class ToolExecutionComponent extends Container {
 		this.toolDefinition = toolDefinition;
 		this.showImages = options.showImages ?? true;
 		this.imageWidthCells = options.imageWidthCells ?? 60;
+		this.imagePresentation = options.imagePresentation;
 		this.ui = ui;
 		this.cwd = cwd;
 
@@ -127,6 +170,16 @@ export class ToolExecutionComponent extends Container {
 
 	private getRenderShell(): "default" | "self" {
 		return this.toolDefinition?.renderShell ?? "default";
+	}
+
+	getToolName(): string {
+		return this.toolName;
+	}
+
+	setImagePresentation(presentation: ToolImagePresentation | undefined): void {
+		this.imagePresentation = presentation;
+		this.updateDisplay();
+		this.ui.requestRender();
 	}
 
 	private getRenderContext(lastComponent: Component | undefined): ToolRenderContext {
@@ -246,6 +299,43 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
+	renderPresentedImage(image: Image, index: number, width: number): string[] {
+		const nativeLines = image.render(width);
+		const context: ToolImageRenderContext = {
+			index,
+			width,
+			expanded: this.expanded,
+			hasOverlay: this.ui.hasOverlay(),
+			nativeLines,
+			bounds: { width, height: nativeLines.length },
+			setExpanded: (expanded) => this.setExpanded(expanded),
+		};
+		let lines: string[];
+		try {
+			lines = this.imagePresentation?.render?.(context) ?? [...nativeLines];
+		} catch {
+			lines = [...nativeLines];
+		}
+		this.imageFrames.set(index, {
+			context: { ...context, bounds: { width, height: lines.length } },
+			lines,
+		});
+		return lines;
+	}
+
+	handlePresentedImageMouse(index: number, event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		const frame = this.imageFrames.get(index);
+		const onClick = this.imagePresentation?.onClick;
+		if (!frame || !onClick || event.type !== "click" || event.button !== "left") return undefined;
+		let handled: boolean | undefined;
+		try {
+			handled = onClick({ ...frame.context, x: event.x, y: event.y });
+		} catch {
+			return undefined;
+		}
+		return handled ? { handled: true } : undefined;
+	}
+
 	override invalidate(): void {
 		super.invalidate();
 		this.updateDisplay();
@@ -259,6 +349,7 @@ export class ToolExecutionComponent extends Container {
 		if (this.hasRendererDefinition() && this.getRenderShell() === "self") {
 			const contentLines = this.selfRenderContainer.render(width);
 			this.selfRenderHeight = contentLines.length;
+			this.imageLayout = [];
 			if (contentLines.length === 0 && this.imageComponents.length === 0) {
 				return [];
 			}
@@ -273,9 +364,12 @@ export class ToolExecutionComponent extends Container {
 				if (spacer) {
 					lines.push(...spacer.render(width));
 				}
-				const imageComponent = this.imageComponents[i];
-				if (imageComponent) {
-					lines.push(...imageComponent.render(width));
+				const imageView = this.imageViews[i];
+				if (imageView) {
+					const startY = lines.length;
+					const imageLines = imageView.render(width);
+					lines.push(...imageLines);
+					this.imageLayout.push({ index: i, startY, height: imageLines.length });
 				}
 			}
 			return lines;
@@ -286,12 +380,39 @@ export class ToolExecutionComponent extends Container {
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
 		if (!this.hasRendererDefinition() || this.getRenderShell() !== "self") return super.handleMouse(event);
-		if (event.y <= 0 || event.y > this.selfRenderHeight) return undefined;
-		return this.selfRenderContainer.handleMouse({
-			...event,
-			y: event.y - 1,
-			height: this.selfRenderHeight,
-		});
+		if (event.y > 0 && event.y <= this.selfRenderHeight) {
+			return this.selfRenderContainer.handleMouse({
+				...event,
+				y: event.y - 1,
+				height: this.selfRenderHeight,
+			});
+		}
+		for (const layout of this.imageLayout) {
+			if (event.y >= layout.startY && event.y < layout.startY + layout.height) {
+				const imageView = this.imageViews[layout.index];
+				if (!imageView) return undefined;
+				const imageEvent = {
+					...event,
+					y: event.y - layout.startY,
+					height: layout.height,
+				};
+				const result = imageView.handleMouse(imageEvent);
+				return result?.handled
+					? {
+							...result,
+							handled: true,
+							target: {
+								component: imageView,
+								originX: event.screenX - event.x,
+								originY: imageEvent.screenY - imageEvent.y,
+								width: event.width,
+								height: layout.height,
+							},
+						}
+					: undefined;
+			}
+		}
+		return undefined;
 	}
 
 	private updateDisplay(): void {
@@ -366,6 +487,12 @@ export class ToolExecutionComponent extends Container {
 			this.removeChild(img);
 		}
 		this.imageComponents = [];
+		for (const imageView of this.imageViews) {
+			this.removeChild(imageView);
+		}
+		this.imageViews = [];
+		this.imageFrames.clear();
+		this.imageLayout = [];
 		for (const spacer of this.imageSpacers) {
 			this.removeChild(spacer);
 		}
@@ -389,10 +516,18 @@ export class ToolExecutionComponent extends Container {
 						imageData,
 						imageMimeType,
 						{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
-						{ maxWidthCells: this.imageWidthCells },
+						{
+							maxWidthCells: this.imageWidthCells,
+							maxHeightCells:
+								!this.expanded && this.imagePresentation?.previewHeightCells !== undefined
+									? Math.max(1, this.imagePresentation.previewHeightCells)
+									: undefined,
+						},
 					);
 					this.imageComponents.push(imageComponent);
-					this.addChild(imageComponent);
+					const imageView = new ToolImageView(this, imageComponent, i);
+					this.imageViews.push(imageView);
+					this.addChild(imageView);
 				}
 			}
 		}

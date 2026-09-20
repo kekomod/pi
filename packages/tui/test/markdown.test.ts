@@ -65,6 +65,55 @@ describe("Markdown component", () => {
 		});
 	});
 
+	describe("Presentation hooks", () => {
+		it("wraps native token rendering without bypassing parsing or highlighting", () => {
+			const seen: string[] = [];
+			const markdown = new Markdown(
+				"### heading\n\n```ts\nconst value = 1;\n```",
+				0,
+				0,
+				defaultMarkdownTheme,
+				undefined,
+				{
+					renderToken: ({ token, renderNative }) => {
+						seen.push(token.type);
+						if (token.type === "heading") return ["projected heading"];
+						return renderNative();
+					},
+				},
+			);
+
+			const lines = markdown.render(60).map(stripAnsi);
+			assert.ok(seen.includes("heading"));
+			assert.ok(seen.includes("code"));
+			assert.ok(lines.some((line) => line.includes("projected heading")));
+			assert.ok(lines.some((line) => line.includes("const value = 1;")));
+		});
+
+		it("allows table rows to be projected while retaining native cell rendering", () => {
+			let tableCalls = 0;
+			const markdown = new Markdown(
+				"| name | value |\n| --- | --- |\n| one | **two** |",
+				0,
+				0,
+				defaultMarkdownTheme,
+				undefined,
+				{
+					renderTable: ({ renderNative, renderInlineTokens, token }) => {
+						tableCalls++;
+						assert.strictEqual(renderInlineTokens(token.header[0]?.tokens ?? []), "name");
+						return renderNative().map((line) => `│ ${line}`);
+					},
+				},
+			);
+
+			const lines = markdown.render(60).map(stripAnsi);
+			assert.strictEqual(tableCalls, 1);
+			assert.ok(lines.some((line) => line.includes("name") && line.startsWith("│ ")));
+			assert.ok(lines.some((line) => line.includes("two")));
+		});
+	});
+
 	describe("Lists", () => {
 		it("should render simple nested list", () => {
 			const markdown = new Markdown(

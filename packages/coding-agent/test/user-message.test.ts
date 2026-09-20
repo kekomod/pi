@@ -55,4 +55,18 @@ describe("UserMessageComponent", () => {
 
 		expect(stripAnsi(component.render(80).join("\n"))).toContain("Message after");
 	});
+
+	test("supports disposable row projections while preserving native rendering", () => {
+		initTheme("dark");
+		const component = new UserMessageComponent("hello");
+		const dispose = component.addRenderProjection(({ nativeLines, role, width }) => {
+			expect(role).toBe("user");
+			expect(width).toBe(20);
+			return nativeLines.map((line, index) => (index === 1 ? `${line} [projected]` : line));
+		});
+
+		expect(stripAnsi(component.render(20).join("\n"))).toContain("[projected]");
+		dispose();
+		expect(stripAnsi(component.render(20).join("\n"))).not.toContain("[projected]");
+	});
 });

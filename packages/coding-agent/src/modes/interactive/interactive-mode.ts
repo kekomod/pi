@@ -75,7 +75,11 @@ import type {
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 	MarkdownTransformer,
+	MessageEntryAssociation,
+	MessagePresentationFactory,
+	MessagePresentationTarget,
 	ProjectTrustContext,
+	ToolImagePresentation,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
@@ -477,6 +481,10 @@ export class InteractiveMode {
 		handler: (data: string) => { consume?: boolean; data?: string } | undefined;
 		unsubscribe: () => void;
 	}>();
+	private messagePresentationFactories = new Map<string, MessagePresentationFactory>();
+	private messageEntryAssociations = new Map<string, MessageEntryAssociation>();
+	private statusFilters = new Map<string, (message: string) => boolean>();
+	private toolImagePresentations = new Map<string, ToolImagePresentation>();
 
 	// Extension widgets (components rendered above/below the editor)
 	private extensionWidgetsAbove = new Map<string, Component & { dispose?(): void }>();
@@ -2251,6 +2259,10 @@ export class InteractiveMode {
 		}
 		this.ui.hideOverlay();
 		this.clearExtensionTerminalInputListeners();
+		this.messagePresentationFactories.clear();
+		this.messageEntryAssociations.clear();
+		this.statusFilters.clear();
+		this.toolImagePresentations.clear();
 		this.setExtensionFooter(undefined);
 		this.setExtensionHeader(undefined);
 		this.clearExtensionWidgets();
@@ -2420,6 +2432,46 @@ export class InteractiveMode {
 		};
 	}
 
+	private attachMessagePresentations(target: MessagePresentationTarget): void {
+		for (const factory of this.messagePresentationFactories.values()) {
+			try {
+				factory(target);
+			} catch {
+				// A presentation extension must not prevent the native transcript from rendering.
+			}
+		}
+	}
+
+	private setMessagePresentation(key: string, factory: MessagePresentationFactory | undefined): void {
+		if (factory) this.messagePresentationFactories.set(key, factory);
+		else this.messagePresentationFactories.delete(key);
+		if (this.isInitialized) this.rebuildChatFromMessages();
+	}
+
+	private setMessageEntryAssociation(key: string, association: MessageEntryAssociation | undefined): void {
+		if (association) this.messageEntryAssociations.set(key, association);
+		else this.messageEntryAssociations.delete(key);
+		if (this.isInitialized) this.rebuildChatFromMessages();
+	}
+
+	private setStatusFilter(key: string, filter: ((message: string) => boolean) | undefined): void {
+		if (filter) this.statusFilters.set(key, filter);
+		else this.statusFilters.delete(key);
+	}
+
+	private setToolImagePresentation(toolName: string, presentation: ToolImagePresentation | undefined): void {
+		if (presentation) this.toolImagePresentations.set(toolName, presentation);
+		else this.toolImagePresentations.delete(toolName);
+		for (const component of this.pendingTools.values()) {
+			if (component.getToolName() === toolName) component.setImagePresentation(presentation);
+		}
+		for (const child of this.chatContainer.children) {
+			if (child instanceof ToolExecutionComponent && child.getToolName() === toolName) {
+				child.setImagePresentation(presentation);
+			}
+		}
+	}
+
 	private createExtensionUIContext(): ExtensionUIContext {
 		return {
 			select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
@@ -2471,6 +2523,11 @@ export class InteractiveMode {
 			},
 			getToolsExpanded: () => this.toolOutputExpanded,
 			setToolsExpanded: (expanded) => this.setToolsExpanded(expanded),
+			setMessagePresentation: (key, factory) => this.setMessagePresentation(key, factory),
+			setMessageEntryAssociation: (customType, association) =>
+				this.setMessageEntryAssociation(customType, association),
+			setStatusFilter: (key, filter) => this.setStatusFilter(key, filter),
+			setToolImagePresentation: (toolName, presentation) => this.setToolImagePresentation(toolName, presentation),
 		};
 	}
 
@@ -3227,13 +3284,14 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
 					this.streamingComponent = new AssistantMessageComponent(
-						undefined,
+						event.message,
 						this.hideThinkingBlock,
 						this.getMarkdownThemeWithSettings(),
 						this.hiddenThinkingLabel,
 						this.outputPad,
 						this.getMarkdownTransformers(),
 					);
+					this.attachMessagePresentations(this.streamingComponent);
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
 					this.streamingComponent.updateContent(this.streamingMessage, true);
@@ -3256,6 +3314,7 @@ export class InteractiveMode {
 									{
 										showImages: this.settingsManager.getShowImages(),
 										imageWidthCells: this.settingsManager.getImageWidthCells(),
+										imagePresentation: this.toolImagePresentations.get(content.name),
 									},
 									this.getRegisteredToolDefinition(content.name),
 									this.ui,
@@ -3331,6 +3390,7 @@ export class InteractiveMode {
 						{
 							showImages: this.settingsManager.getShowImages(),
 							imageWidthCells: this.settingsManager.getImageWidthCells(),
+							imagePresentation: this.toolImagePresentations.get(event.toolName),
 						},
 						this.getRegisteredToolDefinition(event.toolName),
 						this.ui,
@@ -3535,6 +3595,13 @@ export class InteractiveMode {
 	 * we update the previous status line instead of appending new ones to avoid log spam.
 	 */
 	private showStatus(message: string): void {
+		for (const filter of this.statusFilters.values()) {
+			try {
+				if (!filter(message)) return;
+			} catch {
+				// Keep status delivery native when a filter fails.
+			}
+		}
 		const children = this.chatContainer.children;
 		const last = children.length > 0 ? children[children.length - 1] : undefined;
 		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
@@ -3555,6 +3622,18 @@ export class InteractiveMode {
 	}
 
 	private addCustomEntryToChat(entry: Extract<SessionEntry, { type: "custom" }>): void {
+		const association = this.messageEntryAssociations.get(entry.customType);
+		if (association) {
+			for (let i = this.chatContainer.children.length - 1; i >= 0; i--) {
+				const child = this.chatContainer.children[i];
+				if (!(child instanceof UserMessageComponent) && !(child instanceof AssistantMessageComponent)) continue;
+				try {
+					if (association(child, entry) === true) return;
+				} catch {
+					// Fall back to the ordinary entry row when an association cannot be attached.
+				}
+			}
+		}
 		const renderer = this.session.extensionRunner.getEntryRenderer(entry.customType);
 		if (!renderer) {
 			return;
@@ -3644,6 +3723,7 @@ export class InteractiveMode {
 								this.outputPad,
 								this.getMarkdownTransformers(),
 							);
+							this.attachMessagePresentations(userComponent);
 							this.chatContainer.addChild(userComponent);
 						}
 					} else {
@@ -3653,6 +3733,7 @@ export class InteractiveMode {
 							this.outputPad,
 							this.getMarkdownTransformers(),
 						);
+						this.attachMessagePresentations(userComponent);
 						this.chatContainer.addChild(userComponent);
 					}
 					if (options?.populateHistory) {
@@ -3670,6 +3751,7 @@ export class InteractiveMode {
 					this.outputPad,
 					this.getMarkdownTransformers(),
 				);
+				this.attachMessagePresentations(assistantComponent);
 				this.chatContainer.addChild(assistantComponent);
 				break;
 			}
@@ -3724,6 +3806,7 @@ export class InteractiveMode {
 							{
 								showImages: this.settingsManager.getShowImages(),
 								imageWidthCells: this.settingsManager.getImageWidthCells(),
+								imagePresentation: this.toolImagePresentations.get(content.name),
 							},
 							this.getRegisteredToolDefinition(content.name),
 							this.ui,

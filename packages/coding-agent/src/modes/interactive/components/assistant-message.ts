@@ -1,6 +1,10 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Container, Markdown, type MarkdownTheme, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
-import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
+import type {
+	MarkdownTransformer,
+	MessagePresentationTarget,
+	MessageRenderProjection,
+} from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
 
@@ -11,7 +15,8 @@ const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 /**
  * Component that renders a complete assistant message
  */
-export class AssistantMessageComponent extends Container {
+export class AssistantMessageComponent extends Container implements MessagePresentationTarget {
+	readonly role = "assistant" as const;
 	private contentContainer: Container;
 	private hideThinkingBlock: boolean;
 	private markdownTheme: MarkdownTheme;
@@ -20,8 +25,18 @@ export class AssistantMessageComponent extends Container {
 	private markdownTransformers: readonly MarkdownTransformer[];
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
-	private isStreaming = false;
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
+	private projections = new Set<MessageRenderProjection>();
+
+	get message(): unknown {
+		return this.lastMessage;
+	}
+
+	get isStreaming(): boolean {
+		return this.streaming;
+	}
+
+	private streaming = false;
 
 	constructor(
 		message?: AssistantMessage,
@@ -77,7 +92,15 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
-	override render(width: number): string[] {
+	addRenderProjection(projection: MessageRenderProjection): () => void {
+		this.projections.add(projection);
+		this.invalidate();
+		return () => {
+			if (this.projections.delete(projection)) this.invalidate();
+		};
+	}
+
+	private renderNative(width: number): string[] {
 		const lines = super.render(width);
 		if (this.hasToolCalls || lines.length === 0) {
 			return lines;
@@ -88,9 +111,28 @@ export class AssistantMessageComponent extends Container {
 		return lines;
 	}
 
+	override render(width: number): string[] {
+		let lines = this.renderNative(width);
+		for (const projection of this.projections) {
+			try {
+				lines =
+					projection({
+						role: this.role,
+						message: this.message,
+						isStreaming: this.isStreaming,
+						width,
+						nativeLines: lines,
+					}) ?? lines;
+			} catch {
+				// Keep the native transcript visible if an extension projection fails.
+			}
+		}
+		return lines;
+	}
+
 	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
 		this.lastMessage = message;
-		this.isStreaming = isStreaming;
+		this.streaming = isStreaming;
 
 		// Clear content container
 		this.contentContainer.clear();

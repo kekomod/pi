@@ -1,5 +1,9 @@
 import { Box, Container, Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
-import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
+import type {
+	MarkdownTransformer,
+	MessagePresentationTarget,
+	MessageRenderProjection,
+} from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
 
@@ -10,11 +14,18 @@ const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 /**
  * Component that renders a user message
  */
-export class UserMessageComponent extends Container {
+export class UserMessageComponent extends Container implements MessagePresentationTarget {
+	readonly role = "user" as const;
+	readonly isStreaming = false;
 	private text: string;
 	private markdownTheme: MarkdownTheme;
 	private outputPad: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
+	private projections = new Set<MessageRenderProjection>();
+
+	get message(): unknown {
+		return this.text;
+	}
 
 	constructor(
 		text: string,
@@ -57,7 +68,15 @@ export class UserMessageComponent extends Container {
 		this.addChild(contentBox);
 	}
 
-	override render(width: number): string[] {
+	addRenderProjection(projection: MessageRenderProjection): () => void {
+		this.projections.add(projection);
+		this.invalidate();
+		return () => {
+			if (this.projections.delete(projection)) this.invalidate();
+		};
+	}
+
+	private renderNative(width: number): string[] {
 		const lines = super.render(width);
 		if (lines.length === 0) {
 			return lines;
@@ -65,6 +84,25 @@ export class UserMessageComponent extends Container {
 
 		lines[0] = OSC133_ZONE_START + lines[0];
 		lines[lines.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[lines.length - 1];
+		return lines;
+	}
+
+	override render(width: number): string[] {
+		let lines = this.renderNative(width);
+		for (const projection of this.projections) {
+			try {
+				lines =
+					projection({
+						role: this.role,
+						message: this.message,
+						isStreaming: this.isStreaming,
+						width,
+						nativeLines: lines,
+					}) ?? lines;
+			} catch {
+				// Keep the native transcript visible if an extension projection fails.
+			}
+		}
 		return lines;
 	}
 }

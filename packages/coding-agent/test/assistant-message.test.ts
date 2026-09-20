@@ -190,6 +190,29 @@ describe("AssistantMessageComponent", () => {
 		expect(streamingStates).toEqual([true, false]);
 	});
 
+	test("projects rows after streaming state and message updates", () => {
+		initTheme("dark");
+		const seen: Array<{ streaming: boolean; message: unknown }> = [];
+		const first = createAssistantMessage([{ type: "text", text: "first" }]);
+		const second = createAssistantMessage([{ type: "text", text: "second" }]);
+		const component = new AssistantMessageComponent(first);
+		component.addRenderProjection(({ nativeLines, isStreaming, message }) => {
+			seen.push({ streaming: isStreaming, message });
+			return nativeLines.map((line) => `${line} [projected]`);
+		});
+
+		component.render(40);
+		component.updateContent(second, true);
+		const rendered = stripAnsi(component.render(40).join("\n"));
+
+		expect(rendered).toContain("second");
+		expect(rendered).toContain("[projected]");
+		expect(seen).toHaveLength(2);
+		expect(seen[0]?.streaming).toBe(false);
+		expect(seen[1]?.streaming).toBe(true);
+		expect(seen[1]?.message).toBe(second);
+	});
+
 	test("reapplies Markdown transformers when available width changes", () => {
 		initTheme("dark");
 		const availableWidths: number[] = [];

@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import { Text, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { setCapabilities, Text, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { beforeAll, describe, expect, test } from "vitest";
 import { getReadmePath } from "../src/config.ts";
@@ -28,8 +28,12 @@ function createBaseToolDefinition(name = "custom_tool"): ToolDefinition {
 function createFakeTui(): TUI {
 	return {
 		requestRender: () => {},
+		hasOverlay: () => false,
 	} as unknown as TUI;
 }
+
+const TINY_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
 describe("ToolExecutionComponent parity", () => {
 	beforeAll(() => {
@@ -489,6 +493,68 @@ describe("ToolExecutionComponent parity", () => {
 		component.setExpanded(true);
 		const expanded = stripAnsi(component.render(120).join("\n"));
 		expect(expanded).toContain("hidden content");
+	});
+
+	test("keeps image rows in the component tree and exposes geometry and expansion hooks", () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		let clicked = false;
+		const component = new ToolExecutionComponent(
+			"image_tool",
+			"tool-image-hooks",
+			{},
+			{
+				imagePresentation: {
+					previewHeightCells: 1,
+					render: ({ nativeLines, bounds, hasOverlay }) => {
+						expect(bounds.height).toBeGreaterThan(0);
+						expect(bounds.width).toBe(80);
+						expect(hasOverlay).toBe(false);
+						return nativeLines.map((line) => `  ${line}`);
+					},
+					onClick: ({ setExpanded, x, y }) => {
+						expect(x).toBe(2);
+						expect(y).toBeGreaterThanOrEqual(0);
+						clicked = true;
+						setExpanded(true);
+						return true;
+					},
+				},
+			},
+			{
+				...createBaseToolDefinition("image_tool"),
+				renderShell: "self",
+				renderCall: () => new Text("image call", 0, 0),
+			},
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{
+				content: [{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+				details: undefined,
+				isError: false,
+			},
+			false,
+		);
+		const lines = component.render(80);
+		const imageRow = lines.length - 1;
+		const event: TuiMouseEvent = {
+			type: "click",
+			button: "left",
+			x: 2,
+			y: imageRow,
+			screenX: 2,
+			screenY: imageRow,
+			width: 80,
+			height: lines.length,
+			shift: false,
+			alt: false,
+			ctrl: false,
+			clickCount: 1,
+		};
+		expect(component.handleMouse(event)?.handled).toBe(true);
+		expect(clicked).toBe(true);
+		setCapabilities({ images: null, trueColor: false, hyperlinks: false });
 	});
 
 	for (const scenario of [
