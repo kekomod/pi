@@ -1,3 +1,4 @@
+import { Text } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -68,5 +69,29 @@ describe("UserMessageComponent", () => {
 		expect(stripAnsi(component.render(20).join("\n"))).toContain("[projected]");
 		dispose();
 		expect(stripAnsi(component.render(20).join("\n"))).not.toContain("[projected]");
+	});
+
+	test("applies display text, native Markdown hooks, leading components, and width padding", () => {
+		initTheme("dark");
+		const component = new UserMessageComponent("stored message");
+		component.setDisplayText(() => "display preview");
+		component.setOutputPadding(({ width }) => (width < 40 ? 0 : 2));
+		component.addLeadingComponent(() => new Text("leading component", 0, 0));
+		component.addRegionPresentation(({ region }) =>
+			region === "text"
+				? {
+						markdownOptions: {
+							renderToken: ({ token, renderNative }) =>
+								token.type === "paragraph" ? renderNative().map((line) => `${line} [native hook]`) : undefined,
+						},
+					}
+				: undefined,
+		);
+
+		const rendered = stripAnsi(component.render(30).join("\n"));
+		expect(rendered).toContain("leading component");
+		expect(rendered).toContain("display preview [native hook]");
+		expect(rendered).not.toContain("stored message");
+		expect(rendered).toContain("display preview");
 	});
 });

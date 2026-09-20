@@ -30,6 +30,7 @@ export type {
 	AppendEntryHandler,
 	// App keybindings (for custom editors)
 	AppKeybinding,
+	AssistantMessagePresentationTarget,
 	AutocompleteProviderFactory,
 	// Events - Tool (ToolCallEvent types)
 	BashToolCallEvent,
@@ -100,9 +101,19 @@ export type {
 	// Events - Message
 	MessageEndEvent,
 	MessageEntryAssociation,
+	MessageLeadingComponentContext,
+	MessageLeadingComponentFactory,
+	MessageOutputPadding,
+	MessageOutputPaddingContext,
+	MessagePresentationContext,
 	MessagePresentationFactory,
 	MessagePresentationRole,
 	MessagePresentationTarget,
+	MessagePresentationTargetBase,
+	MessageRegionContext,
+	MessageRegionKind,
+	MessageRegionPresentation,
+	MessageRegionRenderer,
 	MessageRenderer,
 	MessageRenderOptions,
 	MessageRenderProjection,
@@ -180,6 +191,7 @@ export type {
 	// Events - User Bash
 	UserBashEvent,
 	UserBashEventResult,
+	UserMessagePresentationTarget,
 	WidgetPlacement,
 	WorkingIndicatorOptions,
 	WriteToolCallEvent,

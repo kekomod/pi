@@ -1,5 +1,5 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { TuiMouseEvent } from "@earendil-works/pi-tui";
+import { Text, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
@@ -263,6 +263,38 @@ describe("AssistantMessageComponent", () => {
 
 		expect(stripAnsi(component.render(80).join("\n"))).toContain("remains visible after error");
 		expect(calls).toEqual(["first", "throw", "last"]);
+	});
+
+	test("configures native thinking regions without replacing message geometry", () => {
+		initTheme("dark");
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([
+				{ type: "thinking", thinking: "private reasoning" },
+				{ type: "text", text: "answer" },
+			]),
+		);
+		component.setOutputPadding(({ width }) => (width < 60 ? 0 : 2));
+		component.addLeadingComponent(() => new Text("leading component", 0, 0));
+		component.addRegionPresentation(({ region }) =>
+			region === "thinking"
+				? {
+						leadingSpacing: 1,
+						markdownTheme: { bold: (text) => text },
+						defaultTextStyle: { italic: true },
+						markdownOptions: {
+							renderToken: ({ token, renderNative }) =>
+								token.type === "paragraph"
+									? renderNative().map((line) => `${line} [thinking hook]`)
+									: undefined,
+						},
+					}
+				: undefined,
+		);
+
+		const rendered = stripAnsi(component.render(50).join("\n"));
+		expect(rendered).toContain("leading component");
+		expect(rendered).toContain("private reasoning [thinking hook]");
+		expect(rendered).toContain("answer");
 	});
 
 	test("transforms text and thinking Markdown without mutating the original message", () => {

@@ -1,12 +1,17 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Container, Markdown, type MarkdownTheme, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
 import type {
+	AssistantMessagePresentationTarget,
 	MarkdownTransformer,
-	MessagePresentationTarget,
+	MessageLeadingComponentContext,
+	MessageLeadingComponentFactory,
+	MessageOutputPadding,
+	MessageRegionRenderer,
 	MessageRenderProjection,
 } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
+import { mergeMarkdownOptions, resolveMessageRegionPresentation } from "./message-presentation.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -15,7 +20,7 @@ const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 /**
  * Component that renders a complete assistant message
  */
-export class AssistantMessageComponent extends Container implements MessagePresentationTarget {
+export class AssistantMessageComponent extends Container implements AssistantMessagePresentationTarget {
 	readonly role = "assistant" as const;
 	private contentContainer: Container;
 	private hideThinkingBlock: boolean;
@@ -27,6 +32,9 @@ export class AssistantMessageComponent extends Container implements MessagePrese
 	private hasToolCalls = false;
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
 	private projections = new Set<MessageRenderProjection>();
+	private regionRenderers = new Set<MessageRegionRenderer>();
+	private leadingComponentFactories = new Set<MessageLeadingComponentFactory>();
+	private outputPadding?: MessageOutputPadding;
 
 	get message(): unknown {
 		return this.lastMessage;
@@ -92,6 +100,27 @@ export class AssistantMessageComponent extends Container implements MessagePrese
 		}
 	}
 
+	addRegionPresentation(renderer: MessageRegionRenderer): () => void {
+		this.regionRenderers.add(renderer);
+		this.invalidate();
+		return () => {
+			if (this.regionRenderers.delete(renderer)) this.invalidate();
+		};
+	}
+
+	setOutputPadding(padding: MessageOutputPadding | undefined): void {
+		this.outputPadding = padding;
+		this.invalidate();
+	}
+
+	addLeadingComponent(factory: MessageLeadingComponentFactory): () => void {
+		this.leadingComponentFactories.add(factory);
+		this.invalidate();
+		return () => {
+			if (this.leadingComponentFactories.delete(factory)) this.invalidate();
+		};
+	}
+
 	addRenderProjection(projection: MessageRenderProjection): () => void {
 		this.projections.add(projection);
 		this.invalidate();
@@ -111,7 +140,24 @@ export class AssistantMessageComponent extends Container implements MessagePrese
 		return lines;
 	}
 
+	private applyOutputPadding(width: number): void {
+		const padding =
+			typeof this.outputPadding === "function"
+				? this.outputPadding({
+						role: this.role,
+						message: this.message,
+						isStreaming: this.isStreaming,
+						width,
+						defaultPadding: this.outputPad,
+					})
+				: this.outputPadding;
+		if (padding !== undefined && Number.isFinite(padding) && padding !== this.outputPad) {
+			this.setOutputPad(Math.max(0, Math.floor(padding)));
+		}
+	}
+
 	override render(width: number): string[] {
+		this.applyOutputPadding(width);
 		let lines = this.renderNative(width);
 		for (const projection of this.projections) {
 			try {
@@ -144,18 +190,50 @@ export class AssistantMessageComponent extends Container implements MessagePrese
 		if (hasVisibleContent) {
 			this.contentContainer.addChild(new Spacer(1));
 		}
+		for (const factory of this.leadingComponentFactories) {
+			try {
+				const component = factory({
+					role: this.role,
+					message: this.message,
+					isStreaming: this.isStreaming,
+				} satisfies MessageLeadingComponentContext);
+				if (component) this.contentContainer.addChild(component);
+			} catch {
+				// Keep native message content when an optional leading component fails.
+			}
+		}
 
 		// Render content in order
 		let thinkingRunIndex = 0;
+		let textRegionIndex = 0;
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && content.text.trim()) {
+				const presentation = resolveMessageRegionPresentation(this.regionRenderers, {
+					role: this.role,
+					region: "text",
+					index: textRegionIndex++,
+					text: content.text.trim(),
+					message: this.message,
+					isStreaming: this.isStreaming,
+				});
+				for (let spacing = 0; spacing < presentation.leadingSpacing; spacing++) {
+					this.contentContainer.addChild(new Spacer(1));
+				}
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				this.contentContainer.addChild(
-					new Markdown(content.text.trim(), this.outputPad, 0, this.markdownTheme, undefined, {
-						transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
-					}),
+					new Markdown(
+						presentation.text,
+						this.outputPad,
+						0,
+						{ ...this.markdownTheme, ...presentation.markdownTheme },
+						presentation.defaultTextStyle,
+						mergeMarkdownOptions(
+							{ transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers) },
+							presentation.markdownOptions,
+						),
+					),
 				);
 			} else if (content.type === "thinking") {
 				const thinkingBlocks: string[] = [];
@@ -183,24 +261,39 @@ export class AssistantMessageComponent extends Container implements MessagePrese
 
 				const runIndex = thinkingRunIndex++;
 				const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
+				const presentation = resolveMessageRegionPresentation(this.regionRenderers, {
+					role: this.role,
+					region: "thinking",
+					index: runIndex,
+					text: thinkingBlocks.join("\n\n"),
+					message: this.message,
+					isStreaming: this.isStreaming,
+				});
+				for (let spacing = 0; spacing < presentation.leadingSpacing; spacing++) {
+					this.contentContainer.addChild(new Spacer(1));
+				}
 				const thinkingComponent = hidden
 					? new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0)
 					: new Markdown(
-							thinkingBlocks.join("\n\n"),
+							presentation.text,
 							this.outputPad,
 							0,
-							this.markdownTheme,
+							{ ...this.markdownTheme, ...presentation.markdownTheme },
 							{
 								color: (text: string) => theme.fg("thinkingText", text),
 								italic: true,
+								...presentation.defaultTextStyle,
 							},
-							{
-								transform: createMarkdownTransform(
-									"assistant-thinking",
-									this.isStreaming,
-									this.markdownTransformers,
-								),
-							},
+							mergeMarkdownOptions(
+								{
+									transform: createMarkdownTransform(
+										"assistant-thinking",
+										this.isStreaming,
+										this.markdownTransformers,
+									),
+								},
+								presentation.markdownOptions,
+							),
 						);
 				this.contentContainer.addChild(
 					new MouseRegion(thinkingComponent, (event) => {

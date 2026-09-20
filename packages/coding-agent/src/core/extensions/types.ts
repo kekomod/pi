@@ -37,9 +37,12 @@ import type {
 	AutocompleteItem,
 	AutocompleteProvider,
 	Component,
+	DefaultTextStyle,
 	EditorComponent,
 	EditorTheme,
 	KeyId,
+	MarkdownOptions,
+	MarkdownTheme,
 	OverlayHandle,
 	OverlayOptions,
 	TUI,
@@ -125,14 +128,85 @@ export interface WorkingIndicatorOptions {
 /** The two transcript message kinds that expose presentation projections. */
 export type MessagePresentationRole = "user" | "assistant";
 
-/** A narrow view of a rendered transcript message. */
-export interface MessagePresentationTarget {
+/** A native Markdown region inside a transcript message. */
+export type MessageRegionKind = "text" | "thinking" | "error";
+
+export interface MessageRegionContext {
+	readonly role: MessagePresentationRole;
+	readonly region: MessageRegionKind;
+	readonly index: number;
+	readonly text: string;
+	readonly message: unknown;
+	readonly isStreaming: boolean;
+}
+
+/** Presentation adjustments applied while Pi builds a native message region. */
+export interface MessageRegionPresentation {
+	/** Replace only the displayed region text; the stored message remains unchanged. */
+	readonly text?: string;
+	/** Add native spacer rows immediately before this region. */
+	readonly leadingSpacing?: number;
+	/** Merge these style functions/options into the native Markdown instance. */
+	readonly markdownTheme?: Partial<MarkdownTheme>;
+	readonly defaultTextStyle?: Partial<DefaultTextStyle>;
+	/** Retain Pi's parser, wrapping, highlighting, and native renderer. */
+	readonly markdownOptions?: MarkdownOptions;
+}
+
+export type MessageRegionRenderer = (context: MessageRegionContext) => MessageRegionPresentation | undefined;
+
+export interface MessageOutputPaddingContext {
 	readonly role: MessagePresentationRole;
 	readonly message: unknown;
 	readonly isStreaming: boolean;
-	/** Add a projection after the native message renderer. Returns its disposer. */
-	addRenderProjection(projection: MessageRenderProjection): () => void;
+	readonly width: number;
+	readonly defaultPadding: number;
 }
+
+export type MessageOutputPadding = number | ((context: MessageOutputPaddingContext) => number | undefined);
+
+export interface MessageLeadingComponentContext {
+	readonly role: MessagePresentationRole;
+	readonly message: unknown;
+	readonly isStreaming: boolean;
+}
+
+export type MessageLeadingComponentFactory = (context: MessageLeadingComponentContext) => Component | undefined;
+
+/** Common native layout hooks shared by user and assistant transcript messages. */
+export interface MessagePresentationTargetBase {
+	readonly role: MessagePresentationRole;
+	readonly message: unknown;
+	readonly isStreaming: boolean;
+	/** Add a row projection for cosmetic output that does not change native hit-test geometry. */
+	addRenderProjection(projection: MessageRenderProjection): () => void;
+	/** Configure native Markdown regions before Pi lays out their components. */
+	addRegionPresentation(renderer: MessageRegionRenderer): () => void;
+	/** Resolve message padding before native components render at a given width. */
+	setOutputPadding(padding: MessageOutputPadding | undefined): void;
+	/** Add a component before the native message content, preserving component geometry. */
+	addLeadingComponent(factory: MessageLeadingComponentFactory): () => void;
+}
+
+/** Additional display-text hook available for user messages. */
+export interface UserMessagePresentationTarget extends MessagePresentationTargetBase {
+	readonly role: "user";
+	/** Replace displayed user text without mutating the stored message. */
+	setDisplayText(resolver: ((context: MessagePresentationContext) => string | undefined) | undefined): void;
+}
+
+export interface AssistantMessagePresentationTarget extends MessagePresentationTargetBase {
+	readonly role: "assistant";
+}
+
+/** A narrow view of a rendered transcript message. */
+export type MessagePresentationTarget = UserMessagePresentationTarget | AssistantMessagePresentationTarget;
+
+export type MessagePresentationContext = {
+	readonly role: MessagePresentationRole;
+	readonly message: unknown;
+	readonly isStreaming: boolean;
+};
 
 /**
  * Transform the rows produced by the native message component.
