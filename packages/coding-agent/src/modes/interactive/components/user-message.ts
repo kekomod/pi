@@ -26,6 +26,7 @@ function escapeLiteralControls(text: string): string {
 
 export interface UserMessageComponentOptions {
 	readonly literal?: boolean;
+	readonly literalTextStyle?: (content: string) => string;
 }
 
 /**
@@ -46,6 +47,7 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 	private builtDisplayText: string;
 	private builtDisplayWidth: number | undefined;
 	private readonly literal: boolean;
+	private readonly literalTextStyle?: (content: string) => string;
 
 	get message(): unknown {
 		return this.text;
@@ -64,6 +66,7 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		this.outputPad = outputPad;
 		this.markdownTransformers = markdownTransformers;
 		this.literal = options.literal === true;
+		this.literalTextStyle = options.literalTextStyle;
 		this.builtDisplayText = text;
 		this.builtDisplayWidth = undefined;
 		this.rebuild();
@@ -142,7 +145,12 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		}
 		if (this.literal) {
 			contentBox.addChild(
-				new Text(escapeLiteralControls(presentation.text), 0, 0, (content) => theme.fg("userMessageText", content)),
+				new Text(
+					escapeLiteralControls(presentation.text),
+					0,
+					0,
+					this.literalTextStyle ?? ((content) => theme.fg("userMessageText", content)),
+				),
 			);
 		} else {
 			contentBox.addChild(

@@ -36,6 +36,19 @@ describe("queued message presentation", () => {
 		expect(rows.join("\n")).not.toContain("\x1b]0;unsafe\x07");
 	});
 
+	test("literal text style applies inside the native panel", () => {
+		initTheme("dark", false);
+		const component = new UserMessageComponent("queued", getMarkdownTheme(), 1, [], {
+			literal: true,
+			literalTextStyle: (content) => `muted<${content}>`,
+		});
+		const rows = component.render(20);
+
+		expect(rows.some((row) => /muted<queued\s+>/.test(row))).toBe(true);
+		expect(rows[0]).not.toContain("muted<");
+		expect(rows.at(-1)).not.toContain("muted<");
+	});
+
 	test("custom components replace only queued rows and preserve the native edit hint", () => {
 		initTheme("dark", false);
 		const steering = ["Steer one", "Steer two"];

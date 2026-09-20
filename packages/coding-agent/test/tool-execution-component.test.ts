@@ -557,6 +557,55 @@ describe("ToolExecutionComponent parity", () => {
 		setCapabilities({ images: null, trueColor: false, hyperlinks: false });
 	});
 
+	test("image presentation controls native render width with a safe fallback", () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		const observed: Array<{ width: number; renderWidth: number; boundWidth: number }> = [];
+		const component = new ToolExecutionComponent(
+			"image_tool",
+			"tool-image-render-width",
+			{},
+			{
+				imagePresentation: {
+					getRenderWidth: () => 23.8,
+					render: ({ width, renderWidth, bounds, nativeLines }) => {
+						observed.push({ width, renderWidth, boundWidth: bounds.width });
+						expect(nativeLines[0]).toContain("\x1b_G");
+						return [...nativeLines];
+					},
+				},
+			},
+			{
+				...createBaseToolDefinition("image_tool"),
+				renderShell: "self",
+				renderCall: () => new Text("image call", 0, 0),
+			},
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{
+				content: [{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+				details: undefined,
+				isError: false,
+			},
+			false,
+		);
+		component.render(80);
+		expect(observed).toEqual([{ width: 80, renderWidth: 23, boundWidth: 23 }]);
+
+		observed.length = 0;
+		component.setImagePresentation({
+			getRenderWidth: () => Number.NaN,
+			render: ({ width, renderWidth, bounds }) => {
+				observed.push({ width, renderWidth, boundWidth: bounds.width });
+				return [];
+			},
+		});
+		component.render(80);
+		expect(observed).toEqual([{ width: 80, renderWidth: 80, boundWidth: 80 }]);
+		setCapabilities({ images: null, trueColor: false, hyperlinks: false });
+	});
+
 	for (const scenario of [
 		{
 			title: "SKILL.md",

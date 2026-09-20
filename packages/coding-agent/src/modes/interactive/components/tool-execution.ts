@@ -51,6 +51,18 @@ interface ToolImageHost {
 	handlePresentedImageMouse(index: number, event: TuiMouseEvent): TuiMouseEventResult | undefined;
 }
 
+function resolveImageRenderWidth(presentation: ToolImagePresentation | undefined, width: number): number {
+	const fallback = Math.max(1, Math.floor(width));
+	if (!presentation?.getRenderWidth) return fallback;
+	try {
+		const candidate = presentation.getRenderWidth(width);
+		if (!Number.isFinite(candidate)) return fallback;
+		return Math.max(1, Math.min(fallback, Math.floor(candidate)));
+	} catch {
+		return fallback;
+	}
+}
+
 /** Keeps image presentation in the normal Component tree for both shell modes. */
 class ToolImageView implements Component {
 	private readonly host: ToolImageHost;
@@ -300,14 +312,16 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 	}
 
 	renderPresentedImage(image: Image, index: number, width: number): string[] {
-		const nativeLines = image.render(width);
+		const renderWidth = resolveImageRenderWidth(this.imagePresentation, width);
+		const nativeLines = image.render(renderWidth);
 		const context: ToolImageRenderContext = {
 			index,
 			width,
+			renderWidth,
 			expanded: this.expanded,
 			hasOverlay: this.ui.hasOverlay(),
 			nativeLines,
-			bounds: { width, height: nativeLines.length },
+			bounds: { width: renderWidth, height: nativeLines.length },
 			setExpanded: (expanded) => this.setExpanded(expanded),
 		};
 		let lines: string[];

@@ -206,6 +206,8 @@ export type QueuedMessageKind = "steering" | "followUp";
 
 export interface QueuedMessageComponentOptions {
 	readonly literal?: boolean;
+	/** Style literal rows without changing the native panel or queue ownership. */
+	readonly literalTextStyle?: (content: string) => string;
 }
 
 export interface QueuedMessagePresentationContext {
@@ -256,6 +258,8 @@ export interface ToolImageBounds {
 export interface ToolImageRenderContext {
 	readonly index: number;
 	readonly width: number;
+	/** Width passed to the native Image renderer after presentation layout. */
+	readonly renderWidth: number;
 	readonly expanded: boolean;
 	readonly hasOverlay: boolean;
 	readonly nativeLines: readonly string[];
@@ -265,6 +269,8 @@ export interface ToolImageRenderContext {
 
 /** Presentation hooks for tool-result images. The native Image component remains the source of rows. */
 export interface ToolImagePresentation {
+	/** Resolve the native image width from the enclosing tool width. Invalid values use the full width. */
+	readonly getRenderWidth?: (width: number) => number;
 	/** Limit preview image height while the tool output is collapsed. */
 	readonly previewHeightCells?: number;
 	/** Transform image rows, for example to add an indentation gutter or hide them under an overlay. */
