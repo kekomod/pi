@@ -420,6 +420,9 @@ export function compositeTuiLine(
 
 export type TuiMode = "regular" | "fullscreen";
 
+/** Receives the concrete renderer behind a stable interactive TUI reference. */
+export type TuiRendererChangeListener = (renderer: TUI) => void;
+
 export interface TuiStopOptions {
 	/** Leave renderer output in place for another TUI taking over the same terminal. */
 	preserveScreen?: boolean;
@@ -449,6 +452,12 @@ export interface TUI extends Component {
 	requestImmediateRender(): void;
 	addInputListener(listener: TuiInputListener): () => void;
 	removeInputListener(listener: TuiInputListener): void;
+	/**
+	 * Optional stable-reference hook. The listener is called synchronously with
+	 * the current renderer on subscription and after each renderer replacement.
+	 * The listener owns subscriptions it creates on that renderer.
+	 */
+	onRendererChange?: (listener: TuiRendererChangeListener) => () => void;
 	onTerminalColorSchemeChange(listener: (scheme: TerminalColorScheme) => void): () => void;
 	setTerminalColorSchemeNotifications(enabled: boolean): void;
 	queryTerminalBackgroundColor(options: { timeoutMs: number }): Promise<RgbColor | undefined>;

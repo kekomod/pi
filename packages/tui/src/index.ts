@@ -147,6 +147,7 @@ export {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 	type TuiMouseEventType,
+	type TuiRendererChangeListener,
 	type TuiStopOptions,
 	type TuiViewportInputListener,
 	type TuiViewportRenderHook,
