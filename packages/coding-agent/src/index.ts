@@ -131,6 +131,10 @@ export type {
 	ProjectTrustHandler,
 	ProviderConfig,
 	ProviderModelConfig,
+	QueuedMessageComponentOptions,
+	QueuedMessageKind,
+	QueuedMessagePresentationContext,
+	QueuedMessagePresentationFactory,
 	ReadToolCallEvent,
 	RegisteredCommand,
 	RegisteredTool,
@@ -420,6 +424,7 @@ export {
 	TreeSelectorComponent,
 	truncateToVisualLines,
 	UserMessageComponent,
+	type UserMessageComponentOptions,
 	UserMessageSelectorComponent,
 	type VisualTruncateResult,
 } from "./modes/interactive/components/index.ts";

@@ -1,4 +1,4 @@
-import { Box, Container, Markdown, type MarkdownTheme, Spacer } from "@earendil-works/pi-tui";
+import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import type {
 	MarkdownTransformer,
 	MessageLeadingComponentContext,
@@ -17,6 +17,17 @@ const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 
+function escapeLiteralControls(text: string): string {
+	return text.replace(
+		/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g,
+		(character) => `\\x${character.charCodeAt(0).toString(16).padStart(2, "0")}`,
+	);
+}
+
+export interface UserMessageComponentOptions {
+	readonly literal?: boolean;
+}
+
 /**
  * Component that renders a user message
  */
@@ -34,6 +45,7 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 	private displayTextResolver?: (context: MessagePresentationContext) => string | undefined;
 	private builtDisplayText: string;
 	private builtDisplayWidth: number | undefined;
+	private readonly literal: boolean;
 
 	get message(): unknown {
 		return this.text;
@@ -44,12 +56,14 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
+		options: UserMessageComponentOptions = {},
 	) {
 		super();
 		this.text = text;
 		this.markdownTheme = markdownTheme;
 		this.outputPad = outputPad;
 		this.markdownTransformers = markdownTransformers;
+		this.literal = options.literal === true;
 		this.builtDisplayText = text;
 		this.builtDisplayWidth = undefined;
 		this.rebuild();
@@ -126,26 +140,32 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		for (let spacing = 0; spacing < presentation.leadingSpacing; spacing++) {
 			contentBox.addChild(new Spacer(1));
 		}
-		contentBox.addChild(
-			new Markdown(
-				presentation.text,
-				0,
-				0,
-				{ ...this.markdownTheme, ...presentation.markdownTheme },
-				{
-					color: (content: string) => theme.fg("userMessageText", content),
-					...presentation.defaultTextStyle,
-				},
-				mergeMarkdownOptions(
+		if (this.literal) {
+			contentBox.addChild(
+				new Text(escapeLiteralControls(presentation.text), 0, 0, (content) => theme.fg("userMessageText", content)),
+			);
+		} else {
+			contentBox.addChild(
+				new Markdown(
+					presentation.text,
+					0,
+					0,
+					{ ...this.markdownTheme, ...presentation.markdownTheme },
 					{
-						preserveOrderedListMarkers: true,
-						preserveBackslashEscapes: true,
-						transform: createMarkdownTransform("user", false, this.markdownTransformers),
+						color: (content: string) => theme.fg("userMessageText", content),
+						...presentation.defaultTextStyle,
 					},
-					presentation.markdownOptions,
+					mergeMarkdownOptions(
+						{
+							preserveOrderedListMarkers: true,
+							preserveBackslashEscapes: true,
+							transform: createMarkdownTransform("user", false, this.markdownTransformers),
+						},
+						presentation.markdownOptions,
+					),
 				),
-			),
-		);
+			);
+		}
 		this.addChild(contentBox);
 	}
 

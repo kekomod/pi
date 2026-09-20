@@ -79,6 +79,7 @@ import type {
 	MessagePresentationFactory,
 	MessagePresentationTarget,
 	ProjectTrustContext,
+	QueuedMessagePresentationFactory,
 	ToolImagePresentation,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
@@ -485,6 +486,7 @@ export class InteractiveMode {
 	private messageEntryAssociations = new Map<string, MessageEntryAssociation>();
 	private statusFilters = new Map<string, (message: string) => boolean>();
 	private toolImagePresentations = new Map<string, ToolImagePresentation>();
+	private queuedMessagePresentation: QueuedMessagePresentationFactory | undefined;
 
 	// Extension widgets (components rendered above/below the editor)
 	private extensionWidgetsAbove = new Map<string, Component & { dispose?(): void }>();
@@ -2472,6 +2474,11 @@ export class InteractiveMode {
 		}
 	}
 
+	private setQueuedMessagePresentation(factory: QueuedMessagePresentationFactory | undefined): void {
+		this.queuedMessagePresentation = factory;
+		if (this.isInitialized) this.updatePendingMessagesDisplay();
+	}
+
 	private createExtensionUIContext(): ExtensionUIContext {
 		return {
 			select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
@@ -2528,6 +2535,7 @@ export class InteractiveMode {
 				this.setMessageEntryAssociation(customType, association),
 			setStatusFilter: (key, filter) => this.setStatusFilter(key, filter),
 			setToolImagePresentation: (toolName, presentation) => this.setToolImagePresentation(toolName, presentation),
+			setQueuedMessagePresentation: (factory) => this.setQueuedMessagePresentation(factory),
 		};
 	}
 
@@ -4455,13 +4463,36 @@ export class InteractiveMode {
 		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
 		if (steeringMessages.length > 0 || followUpMessages.length > 0) {
 			this.pendingMessagesContainer.addChild(new Spacer(1));
-			for (const message of steeringMessages) {
-				const text = theme.fg("dim", `Steering: ${message}`);
+			const addMessage = (kind: "steering" | "followUp", message: string, label: string): void => {
+				let replacement: Component | undefined;
+				try {
+					replacement = this.queuedMessagePresentation?.({
+						kind,
+						text: message,
+						createUserMessage: (options = {}) =>
+							new UserMessageComponent(
+								message,
+								this.getMarkdownThemeWithSettings(),
+								this.outputPad,
+								this.getMarkdownTransformers(),
+								options,
+							),
+					});
+				} catch {
+					replacement = undefined;
+				}
+				if (replacement) {
+					this.pendingMessagesContainer.addChild(replacement);
+					return;
+				}
+				const text = theme.fg("dim", `${label}: ${message}`);
 				this.pendingMessagesContainer.addChild(new TruncatedText(text, 1, 0));
+			};
+			for (const message of steeringMessages) {
+				addMessage("steering", message, "Steering");
 			}
 			for (const message of followUpMessages) {
-				const text = theme.fg("dim", `Follow-up: ${message}`);
-				this.pendingMessagesContainer.addChild(new TruncatedText(text, 1, 0));
+				addMessage("followUp", message, "Follow-up");
 			}
 			const dequeueHint = this.getAppKeyDisplay("app.message.dequeue");
 			const hintText = theme.fg("dim", `↳ ${dequeueHint} to edit all queued messages`);

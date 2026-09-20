@@ -202,6 +202,22 @@ export interface AssistantMessagePresentationTarget extends MessagePresentationT
 /** A narrow view of a rendered transcript message. */
 export type MessagePresentationTarget = UserMessagePresentationTarget | AssistantMessagePresentationTarget;
 
+export type QueuedMessageKind = "steering" | "followUp";
+
+export interface QueuedMessageComponentOptions {
+	readonly literal?: boolean;
+}
+
+export interface QueuedMessagePresentationContext {
+	readonly kind: QueuedMessageKind;
+	readonly text: string;
+	/** Create a display-only user component using Pi's current theme and settings. */
+	readonly createUserMessage: (options?: QueuedMessageComponentOptions) => Component & UserMessagePresentationTarget;
+}
+
+/** Replace one queued summary component while Pi retains queue state and controls. */
+export type QueuedMessagePresentationFactory = (context: QueuedMessagePresentationContext) => Component | undefined;
+
 export type MessagePresentationContext = {
 	readonly role: MessagePresentationRole;
 	readonly message: unknown;
@@ -433,6 +449,9 @@ export interface ExtensionUIContext {
 
 	/** Configure image row presentation for all executions of a tool name. */
 	setToolImagePresentation?: (toolName: string, presentation: ToolImagePresentation | undefined) => void;
+
+	/** Configure display-only queued message components; queue state and editing stay native. */
+	setQueuedMessagePresentation?: (factory: QueuedMessagePresentationFactory | undefined) => void;
 }
 
 // ============================================================================
