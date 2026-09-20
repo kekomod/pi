@@ -505,6 +505,16 @@ export class Editor implements Component, Focusable {
 		return this.borderColor(border);
 	}
 
+	/**
+	 * Render the active autocomplete list while keeping its interaction state native.
+	 * Subclasses may adjust the returned rows without replacing the SelectList, so
+	 * selection, callbacks, keyboard input, and mouse coordinates remain owned by
+	 * the editor.
+	 */
+	protected renderAutocompleteList(list: SelectList, width: number, _prefix: string): string[] {
+		return list.render(width);
+	}
+
 	render(width: number): string[] {
 		const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
 		const paddingX = Math.min(this.paddingX, maxPadding);
@@ -605,7 +615,11 @@ export class Editor implements Component, Focusable {
 		// Add autocomplete list if active
 		this.renderedAutocompleteHeight = 0;
 		if (this.autocompleteState && this.autocompleteList) {
-			const autocompleteResult = this.autocompleteList.render(contentWidth);
+			const autocompleteResult = this.renderAutocompleteList(
+				this.autocompleteList,
+				contentWidth,
+				this.autocompletePrefix,
+			);
 			this.renderedAutocompleteHeight = autocompleteResult.length;
 			for (const line of autocompleteResult) {
 				const lineWidth = visibleWidth(line);
