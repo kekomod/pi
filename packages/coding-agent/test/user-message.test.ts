@@ -94,4 +94,20 @@ describe("UserMessageComponent", () => {
 		expect(rendered).not.toContain("stored message");
 		expect(rendered).toContain("display preview");
 	});
+
+	test("passes terminal width to display resolvers and rebuilds native text by width", () => {
+		initTheme("dark");
+		const widths: number[] = [];
+		const component = new UserMessageComponent("stored message");
+		component.setDisplayText(({ width }) => {
+			widths.push(width);
+			return width < 20 ? "narrow preview" : "wide preview";
+		});
+
+		const narrow = stripAnsi(component.render(12).join("\n"));
+		expect(narrow).toContain("narrow");
+		expect(narrow).toContain("preview");
+		expect(stripAnsi(component.render(40).join("\n"))).toContain("wide preview");
+		expect(widths).toEqual([12, 40]);
+	});
 });

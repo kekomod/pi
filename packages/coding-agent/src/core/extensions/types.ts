@@ -206,6 +206,8 @@ export type MessagePresentationContext = {
 	readonly role: MessagePresentationRole;
 	readonly message: unknown;
 	readonly isStreaming: boolean;
+	/** Terminal width available to width-aware display-text resolvers. */
+	readonly width: number;
 };
 
 /**

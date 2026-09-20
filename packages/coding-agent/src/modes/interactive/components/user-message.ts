@@ -32,6 +32,8 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 	private leadingComponentFactories = new Set<MessageLeadingComponentFactory>();
 	private outputPadding?: MessageOutputPadding;
 	private displayTextResolver?: (context: MessagePresentationContext) => string | undefined;
+	private builtDisplayText: string;
+	private builtDisplayWidth: number | undefined;
 
 	get message(): unknown {
 		return this.text;
@@ -48,6 +50,8 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		this.markdownTheme = markdownTheme;
 		this.outputPad = outputPad;
 		this.markdownTransformers = markdownTransformers;
+		this.builtDisplayText = text;
+		this.builtDisplayWidth = undefined;
 		this.rebuild();
 	}
 
@@ -82,7 +86,18 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		};
 	}
 
-	private rebuild(): void {
+	private resolveDisplayText(width: number): string {
+		return (
+			this.displayTextResolver?.({
+				role: this.role,
+				message: this.message,
+				isStreaming: this.isStreaming,
+				width,
+			}) ?? this.text
+		);
+	}
+
+	private rebuild(width?: number, resolvedText?: string): void {
 		this.clear();
 		for (const factory of this.leadingComponentFactories) {
 			try {
@@ -96,12 +111,9 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 				// Keep native message content when an optional leading component fails.
 			}
 		}
-		const displayText =
-			this.displayTextResolver?.({
-				role: this.role,
-				message: this.message,
-				isStreaming: this.isStreaming,
-			}) ?? this.text;
+		const displayText = resolvedText ?? (width === undefined ? this.text : this.resolveDisplayText(width));
+		this.builtDisplayText = displayText;
+		this.builtDisplayWidth = width;
 		const presentation = resolveMessageRegionPresentation(this.regionRenderers, {
 			role: this.role,
 			region: "text",
@@ -174,6 +186,12 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 
 	override render(width: number): string[] {
 		this.applyOutputPadding(width);
+		if (this.displayTextResolver) {
+			const displayText = this.resolveDisplayText(width);
+			if (this.builtDisplayWidth !== width || this.builtDisplayText !== displayText) {
+				this.rebuild(width, displayText);
+			}
+		}
 		let lines = this.renderNative(width);
 		for (const projection of this.projections) {
 			try {
