@@ -170,6 +170,15 @@ export function wordWrapLine(line: string, maxWidth: number, preSegmented?: Intl
 		if (gWidth > maxWidth) {
 			// Single atomic segment wider than maxWidth (e.g. paste marker
 			// in a narrow terminal). Re-wrap it at grapheme granularity.
+			// A single Unicode grapheme can itself be wider than one cell. It
+			// cannot be split without corrupting the grapheme, so keep it as one
+			// chunk rather than recursing forever on the same segment.
+			if (!isPasteMarker(grapheme) && grapheme.length > 0 && charIndex === chunkStart && currentWidth === 0) {
+				chunks.push({ text: grapheme, startIndex: charIndex, endIndex: charIndex + grapheme.length });
+				chunkStart = charIndex + grapheme.length;
+				wrapOppIndex = -1;
+				continue;
+			}
 
 			// The segment remains logically atomic for cursor
 			// movement / editing — the split is purely visual for word-wrap layout.
