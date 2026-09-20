@@ -1,10 +1,21 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { Container, Markdown, type MarkdownTheme, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
+import {
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	MouseRegion,
+	Spacer,
+	Text,
+	type TuiMouseEvent,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import type {
 	AssistantMessagePresentationTarget,
 	MarkdownTransformer,
 	MessageLeadingComponentContext,
 	MessageLeadingComponentFactory,
+	MessageNativeWidthResolver,
 	MessageOutputPadding,
 	MessageRegionRenderer,
 	MessageRenderProjection,
@@ -35,6 +46,8 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 	private regionRenderers = new Set<MessageRegionRenderer>();
 	private leadingComponentFactories = new Set<MessageLeadingComponentFactory>();
 	private outputPadding?: MessageOutputPadding;
+	private nativeWidthResolver?: MessageNativeWidthResolver;
+	private nativeLayout?: { readonly outerWidth: number; readonly nativeWidth: number };
 
 	get message(): unknown {
 		return this.lastMessage;
@@ -113,6 +126,11 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 		this.invalidate();
 	}
 
+	setNativeRenderWidth(resolver: MessageNativeWidthResolver | undefined): void {
+		this.nativeWidthResolver = resolver;
+		this.invalidate();
+	}
+
 	addLeadingComponent(factory: MessageLeadingComponentFactory): () => void {
 		this.leadingComponentFactories.add(factory);
 		this.invalidate();
@@ -156,9 +174,38 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 		}
 	}
 
+	private resolveNativeRender(width: number): { readonly lines: string[]; readonly nativeWidth: number } {
+		const initial = this.renderNative(width);
+		let nativeWidth = width;
+		try {
+			const candidate = this.nativeWidthResolver?.({
+				role: this.role,
+				message: this.message,
+				isStreaming: this.isStreaming,
+				width,
+				nativeLines: initial,
+			});
+			if (candidate !== undefined && Number.isFinite(candidate))
+				nativeWidth = Math.max(1, Math.min(width, Math.floor(candidate)));
+		} catch {
+			// Keep the full-width native message when an optional resolver fails.
+		}
+		if (nativeWidth === width) return { lines: initial, nativeWidth };
+		return { lines: this.renderNative(nativeWidth), nativeWidth };
+	}
+
+	private padNativeLines(lines: readonly string[], width: number): string[] {
+		return lines.map((line) => {
+			const visible = visibleWidth(line);
+			return visible >= width ? truncateToWidth(line, width) : line + " ".repeat(width - visible);
+		});
+	}
+
 	override render(width: number): string[] {
 		this.applyOutputPadding(width);
-		let lines = this.renderNative(width);
+		const native = this.resolveNativeRender(width);
+		this.nativeLayout = { outerWidth: width, nativeWidth: native.nativeWidth };
+		let lines = native.nativeWidth === width ? native.lines : this.padNativeLines(native.lines, width);
 		for (const projection of this.projections) {
 			try {
 				lines =
@@ -174,6 +221,11 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 			}
 		}
 		return lines;
+	}
+
+	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		const nativeWidth = this.nativeLayout?.outerWidth === event.width ? this.nativeLayout.nativeWidth : event.width;
+		return super.handleMouse({ ...event, width: nativeWidth });
 	}
 
 	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {

@@ -165,6 +165,18 @@ export interface MessageOutputPaddingContext {
 
 export type MessageOutputPadding = number | ((context: MessageOutputPaddingContext) => number | undefined);
 
+/** Context used to reserve width while retaining native message layout and hit testing. */
+export interface MessageNativeWidthContext {
+	readonly role: MessagePresentationRole;
+	readonly message: unknown;
+	readonly isStreaming: boolean;
+	readonly width: number;
+	readonly nativeLines: readonly string[];
+}
+
+/** Return the width for a second native render, or undefined to keep the full width. */
+export type MessageNativeWidthResolver = (context: MessageNativeWidthContext) => number | undefined;
+
 export interface MessageLeadingComponentContext {
 	readonly role: MessagePresentationRole;
 	readonly message: unknown;
@@ -184,6 +196,8 @@ export interface MessagePresentationTargetBase {
 	addRegionPresentation(renderer: MessageRegionRenderer): () => void;
 	/** Resolve message padding before native components render at a given width. */
 	setOutputPadding(padding: MessageOutputPadding | undefined): void;
+	/** Resolve a narrower native render width; Pi pads the native rows and keeps hit testing aligned. */
+	setNativeRenderWidth(resolver: MessageNativeWidthResolver | undefined): void;
 	/** Add a component before the native message content, preserving component geometry. */
 	addLeadingComponent(factory: MessageLeadingComponentFactory): () => void;
 }

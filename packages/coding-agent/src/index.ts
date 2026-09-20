@@ -107,6 +107,8 @@ export type {
 	MessageEntryAssociation,
 	MessageLeadingComponentContext,
 	MessageLeadingComponentFactory,
+	MessageNativeWidthContext,
+	MessageNativeWidthResolver,
 	MessageOutputPadding,
 	MessageOutputPaddingContext,
 	MessagePresentationContext,
