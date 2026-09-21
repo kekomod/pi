@@ -178,11 +178,11 @@ export interface MessageNativeWidthContext {
 export type MessageNativeWidthResolver = (context: MessageNativeWidthContext) => number | undefined;
 
 /**
- * Controls native probe caching for a width resolver.
+ * Controls native probe and derived-row caching for a width resolver.
  *
- * Probe caching is opt in because native leading components can update without
- * notifying their parent message. Callers that cache probes must invalidate the
- * message whenever any native child changes.
+ * Caching is opt in because native leading components can update without notifying
+ * their parent message. Callers that enable it must invalidate the message whenever
+ * any native child, theme, streaming state, or expansion state changes.
  */
 export interface MessageNativeWidthOptions {
 	readonly cacheProbe?: boolean;

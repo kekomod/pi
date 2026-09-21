@@ -101,6 +101,25 @@ describe("native message width reservation", () => {
 		expect(probes).toBe(4);
 	});
 
+	test("reuses the narrow native render and padded rows when probe caching is enabled", () => {
+		initTheme("dark");
+		const observer = new WidthObserver();
+		const component = new AssistantMessageComponent(assistant("answer"));
+		component.addLeadingComponent(() => observer);
+		component.setNativeRenderWidth(({ width }) => width - 8, { cacheProbe: true });
+
+		const first = component.render(40);
+		const second = component.render(40);
+		expect(second).toBe(first);
+		expect(observer.renderWidths).toEqual([40, 32]);
+
+		observer.text = "updated";
+		component.invalidate();
+		const updated = stripAnsi(component.render(40).join("\n"));
+		expect(updated).toContain("updated");
+		expect(observer.renderWidths).toEqual([40, 32, 40, 32]);
+	});
+
 	test("rechecks a changed reservation at the same width", () => {
 		initTheme("dark");
 		const component = new AssistantMessageComponent(

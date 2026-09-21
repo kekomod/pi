@@ -53,6 +53,8 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 		readonly outerWidth: number;
 		readonly nativeWidth: number;
 		readonly probeLines: string[];
+		readonly renderedLines?: string[];
+		readonly paddedLines?: string[];
 	};
 
 	get message(): unknown {
@@ -210,10 +212,15 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 		this.nativeLayout = { outerWidth: width, nativeWidth, probeLines: initial };
 		if (sameWidth && cached && cached.nativeWidth === nativeWidth) {
 			if (nativeWidth === width) return { lines: initial, nativeWidth };
-			return { lines: this.renderNative(nativeWidth), nativeWidth };
+			const lines = cached.renderedLines ?? this.renderNative(nativeWidth);
+			this.nativeLayout = { ...cached, probeLines: initial, renderedLines: lines };
+			return { lines, nativeWidth };
 		}
 		if (nativeWidth === width && !sameWidth) return { lines: initial, nativeWidth };
-		return { lines: this.renderNative(nativeWidth), nativeWidth };
+		const lines = this.renderNative(nativeWidth);
+		if (this.cacheNativeProbe)
+			this.nativeLayout = { outerWidth: width, nativeWidth, probeLines: initial, renderedLines: lines };
+		return { lines, nativeWidth };
 	}
 
 	private padNativeLines(lines: readonly string[], width: number): string[] {
@@ -226,7 +233,18 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 	override render(width: number): string[] {
 		this.applyOutputPadding(width);
 		const native = this.resolveNativeRender(width);
-		let lines = native.nativeWidth === width ? native.lines : this.padNativeLines(native.lines, width);
+		let lines: string[];
+		if (native.nativeWidth === width) lines = native.lines;
+		else {
+			const cached = this.cacheNativeProbe ? this.nativeLayout : undefined;
+			if (cached?.outerWidth === width && cached.nativeWidth === native.nativeWidth && cached.paddedLines)
+				lines = cached.paddedLines;
+			else {
+				lines = this.padNativeLines(native.lines, width);
+				if (cached?.outerWidth === width && cached.nativeWidth === native.nativeWidth)
+					this.nativeLayout = { ...cached, paddedLines: lines };
+			}
+		}
 		for (const projection of this.projections) {
 			try {
 				lines =

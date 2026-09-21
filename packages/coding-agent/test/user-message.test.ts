@@ -110,4 +110,15 @@ describe("UserMessageComponent", () => {
 		expect(stripAnsi(component.render(40).join("\n"))).toContain("wide preview");
 		expect(widths).toEqual([12, 40]);
 	});
+
+	test("reuses padded rows only for the explicit native probe cache", () => {
+		initTheme("dark");
+		const component = new UserMessageComponent("A long user message that needs reserved width.");
+		component.setNativeRenderWidth(({ width }) => width - 8, { cacheProbe: true });
+
+		const first = component.render(40);
+		expect(component.render(40)).toBe(first);
+		component.invalidate();
+		expect(component.render(40)).not.toBe(first);
+	});
 });

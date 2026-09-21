@@ -61,6 +61,9 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		readonly outerWidth: number;
 		readonly nativeWidth: number;
 		readonly probeLines: string[];
+		readonly renderedLines?: string[];
+		readonly paddedLines?: string[];
+		readonly paddingSignature?: string;
 	};
 	private displayTextResolver?: (context: MessagePresentationContext) => string | undefined;
 	private builtDisplayText: string;
@@ -271,10 +274,15 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		this.nativeLayout = { outerWidth: width, nativeWidth, probeLines: initial };
 		if (sameWidth && cached && cached.nativeWidth === nativeWidth) {
 			if (nativeWidth === width) return { lines: initial, nativeWidth };
-			return { lines: this.renderNative(nativeWidth), nativeWidth };
+			const lines = cached.renderedLines ?? this.renderNative(nativeWidth);
+			this.nativeLayout = { ...cached, probeLines: initial, renderedLines: lines };
+			return { lines, nativeWidth };
 		}
 		if (nativeWidth === width && !sameWidth) return { lines: initial, nativeWidth };
-		return { lines: this.renderNative(nativeWidth), nativeWidth };
+		const lines = this.renderNative(nativeWidth);
+		if (this.cacheNativeProbe)
+			this.nativeLayout = { outerWidth: width, nativeWidth, probeLines: initial, renderedLines: lines };
+		return { lines, nativeWidth };
 	}
 
 	private padNativeLines(lines: readonly string[], width: number): string[] {
@@ -286,6 +294,10 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		});
 	}
 
+	private paddingSignature(): string {
+		return theme.bg("userMessageBg", "\u0000");
+	}
+
 	override render(width: number): string[] {
 		this.applyOutputPadding(width);
 		if (this.displayTextResolver) {
@@ -295,7 +307,24 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 			}
 		}
 		const native = this.resolveNativeRender(width);
-		let lines = native.nativeWidth === width ? native.lines : this.padNativeLines(native.lines, width);
+		let lines: string[];
+		if (native.nativeWidth === width) lines = native.lines;
+		else {
+			const signature = this.paddingSignature();
+			const cached = this.cacheNativeProbe ? this.nativeLayout : undefined;
+			if (
+				cached?.outerWidth === width &&
+				cached.nativeWidth === native.nativeWidth &&
+				cached.paddingSignature === signature &&
+				cached.paddedLines
+			)
+				lines = cached.paddedLines;
+			else {
+				lines = this.padNativeLines(native.lines, width);
+				if (cached?.outerWidth === width && cached.nativeWidth === native.nativeWidth)
+					this.nativeLayout = { ...cached, paddedLines: lines, paddingSignature: signature };
+			}
+		}
 		for (const projection of this.projections) {
 			try {
 				lines =
