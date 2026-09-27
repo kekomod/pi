@@ -49,6 +49,8 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 	private outputPadding?: MessageOutputPadding;
 	private nativeWidthResolver?: MessageNativeWidthResolver;
 	private cacheNativeProbe = false;
+	private collapseThinkingOnComplete = false;
+	private collapsedThinkingOnComplete = false;
 	private nativeLayout?: {
 		readonly outerWidth: number;
 		readonly nativeWidth: number;
@@ -105,6 +107,14 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 		this.thinkingVisibilityOverrides.clear();
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
+		}
+	}
+
+	setCollapseThinkingOnComplete(collapse: boolean): void {
+		if (this.collapseThinkingOnComplete === collapse) return;
+		this.collapseThinkingOnComplete = collapse;
+		if (collapse && this.lastMessage && !this.streaming) {
+			this.updateContent(this.lastMessage, false);
 		}
 	}
 
@@ -271,6 +281,14 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 		this.nativeLayout = undefined;
 		this.lastMessage = message;
 		this.streaming = isStreaming;
+		if (!isStreaming && this.collapseThinkingOnComplete && !this.collapsedThinkingOnComplete) {
+			const hasThinking = message.content.some((content) => content.type === "thinking" && content.thinking.trim());
+			if (hasThinking) {
+				this.hideThinkingBlock = true;
+				this.thinkingVisibilityOverrides.clear();
+				this.collapsedThinkingOnComplete = true;
+			}
+		}
 
 		// Clear content container
 		this.contentContainer.clear();

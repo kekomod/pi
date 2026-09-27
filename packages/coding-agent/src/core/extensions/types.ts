@@ -58,6 +58,7 @@ import type { KeybindingsManager } from "../keybindings.ts";
 import type { CustomMessage } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
+import type { SessionController } from "../session-controller.ts";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
@@ -222,6 +223,8 @@ export interface UserMessagePresentationTarget extends MessagePresentationTarget
 
 export interface AssistantMessagePresentationTarget extends MessagePresentationTargetBase {
 	readonly role: "assistant";
+	/** Collapse nonempty thinking runs once when this message completes. */
+	setCollapseThinkingOnComplete(collapse: boolean): void;
 }
 
 /** A narrow view of a rendered transcript message. */
@@ -287,8 +290,12 @@ export interface ToolImageRenderContext {
 	readonly renderWidth: number;
 	readonly expanded: boolean;
 	readonly hasOverlay: boolean;
+	/** True when this is the final image view attached for the tool result. */
+	readonly isLastImage: boolean;
 	readonly nativeLines: readonly string[];
 	readonly bounds: ToolImageBounds;
+	/** Position of this tool call in an active transcript group, when configured. */
+	readonly group?: ToolGroupMemberRenderContext;
 	readonly setExpanded: (expanded: boolean) => void;
 }
 
@@ -298,12 +305,45 @@ export interface ToolImagePresentation {
 	readonly getRenderWidth?: (width: number) => number;
 	/** Limit preview image height while the tool output is collapsed. */
 	readonly previewHeightCells?: number;
+	/** Rows before each native image view. Defaults to one row and is capped at ten. */
+	readonly spacingRows?: number;
 	/** Transform image rows, for example to add an indentation gutter or hide them under an overlay. */
-	readonly render?: (context: ToolImageRenderContext) => string[] | undefined;
+	readonly render?: (context: ToolImageRenderContext, theme: Theme) => string[] | undefined;
 	/** Handle a click in image-local coordinates. Return true when the event was consumed. */
 	readonly onClick?: (
 		context: ToolImageRenderContext & { readonly x: number; readonly y: number },
 	) => boolean | undefined;
+}
+
+/** Aggregate state for a contiguous group of tool executions in the transcript. */
+export interface ToolGroupRenderContext {
+	readonly key: string;
+	readonly size: number;
+	/** Elapsed time from the earliest execution start to the latest execution finish, when known. */
+	readonly elapsedMs?: number;
+	/** Number of group members that have not completed yet. */
+	readonly pending: number;
+	/** Number of group members that completed with an error. */
+	readonly failed: number;
+	/** True when every group member is expanded. */
+	readonly expanded: boolean;
+	/** Expand or collapse every native tool execution in this group. */
+	readonly setExpanded: (expanded: boolean) => void;
+}
+
+/** Position within a tool group. Index and size may change while a transcript group is active. */
+export interface ToolGroupMemberRenderContext {
+	readonly key: string;
+	readonly index: number;
+	readonly size: number;
+}
+
+/** Presentation for a contiguous sequence of native tool executions. */
+export interface ToolGroupPresentation {
+	/** Return a shared key for tools that should be grouped, or undefined to break the sequence. */
+	readonly groupKey: (toolName: string) => string | undefined;
+	/** Render the shared header, hosted by the first native tool execution in the group. */
+	readonly renderHeader: (context: ToolGroupRenderContext, theme: Theme) => Component;
 }
 
 /** Wrap the current autocomplete provider with additional behavior. */
@@ -480,6 +520,8 @@ export interface ExtensionUIContext {
 
 	/** Configure image row presentation for all executions of a tool name. */
 	setToolImagePresentation?: (toolName: string, presentation: ToolImagePresentation | undefined) => void;
+	/** Group consecutive native tool executions in the interactive transcript. */
+	setToolGroupPresentation?: (presentation: ToolGroupPresentation | undefined) => void;
 
 	/** Configure display-only queued message components; queue state and editing stay native. */
 	setQueuedMessagePresentation?: (factory: QueuedMessagePresentationFactory | undefined) => void;
@@ -643,8 +685,12 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 	expanded: boolean;
 	/** Whether inline images are currently shown in the TUI. */
 	showImages: boolean;
+	/** Whether native image views are attached for this tool result. */
+	hasRenderedImages: boolean;
 	/** Whether the current result is an error. */
 	isError: boolean;
+	/** Position of this tool call in an active transcript group, when configured. */
+	group?: ToolGroupMemberRenderContext;
 }
 
 /**
@@ -1063,7 +1109,7 @@ export interface UserBashEvent {
 // ============================================================================
 
 /** Source of user input */
-export type InputSource = "interactive" | "rpc" | "extension";
+export type InputSource = "interactive" | "rpc" | "extension" | "remote";
 
 /** Fired when user input is received, before agent processing */
 export interface InputEvent {
@@ -1579,6 +1625,9 @@ export interface ExtensionAPI {
 		options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
 	): void;
 
+	/** Get a narrow controller for the current live AgentSession, when supported by the mode. */
+	getSessionController?(): SessionController;
+
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
@@ -1711,6 +1760,14 @@ export interface ExtensionAPI {
 // Provider Registration Types
 // ============================================================================
 
+/** A provider-owned login flow invoked from the interactive /login menu. */
+export interface ExternalLoginConfig {
+	/** Auth method label used by the /login UI. Credentials remain owned by the extension. */
+	authType: "oauth" | "api_key";
+	/** Run the login flow. The handler owns its completion UI and credential storage. */
+	handler(context: ExtensionCommandContext): Promise<void>;
+}
+
 /** Configuration for registering a provider via pi.registerProvider(). */
 export interface ProviderConfig {
 	/** Display name for the provider in UI. */
@@ -1739,6 +1796,8 @@ export interface ProviderConfig {
 	 * Use context.publish({ persist: entry }) when the catalog should persist across sessions.
 	 */
 	refreshModels?(context: RefreshModelsContext): Promise<ProviderModelConfig[]>;
+	/** Use an extension-owned login flow instead of Pi's native auth flow for this provider. */
+	externalLogin?: ExternalLoginConfig;
 	/** OAuth provider for /login support. The `id` is set automatically from the provider name. */
 	oauth?: {
 		/** Display name for the provider in login UI. */
@@ -1835,6 +1894,8 @@ export type SendUserMessageHandler = (
 	options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
 ) => void;
 
+export type GetSessionControllerHandler = () => SessionController;
+
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
 export type SetSessionNameHandler = (name: string) => void;
@@ -1880,6 +1941,8 @@ export interface ExtensionRuntimeState {
 	invalidate: (message?: string) => void;
 	/** Retain an event-bus subscription until this runtime is invalidated. */
 	trackEventBusSubscription: (unsubscribe: () => void) => () => void;
+	/** Retain a session-event subscription until this runtime is invalidated. */
+	trackSessionSubscription?: (unsubscribe: () => void) => () => void;
 	/**
 	 * Register or unregister a provider.
 	 *
@@ -1910,6 +1973,8 @@ export interface ExtensionActions {
 	setModel: SetModelHandler;
 	getThinkingLevel: GetThinkingLevelHandler;
 	setThinkingLevel: SetThinkingLevelHandler;
+	/** Optional to preserve compatibility with existing ExtensionActions mocks. */
+	getSessionController?: GetSessionControllerHandler;
 }
 
 /**

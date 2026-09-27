@@ -190,6 +190,81 @@ describe("AssistantMessageComponent", () => {
 		expect(streamingStates).toEqual([true, false]);
 	});
 
+	test("completion hides a thinking run opened while streaming and preserves later choices across invalidation", () => {
+		initTheme("dark");
+		const message = createAssistantMessage([
+			{ type: "thinking", thinking: "private reasoning" },
+			{ type: "text", text: "answer" },
+		]);
+		const component = new AssistantMessageComponent(undefined, true);
+		component.setCollapseThinkingOnComplete(true);
+		component.updateContent(message, true);
+		const streaming = component.render(80);
+		const streamingHiddenRow = streaming.findIndex((line) => stripAnsi(line).includes("Thinking..."));
+		expect(streamingHiddenRow).toBeGreaterThanOrEqual(0);
+		const streamingClick: TuiMouseEvent = {
+			type: "click",
+			button: "left",
+			x: 1,
+			y: streamingHiddenRow,
+			screenX: 1,
+			screenY: streamingHiddenRow,
+			width: 80,
+			height: streaming.length,
+			shift: false,
+			alt: false,
+			ctrl: false,
+			clickCount: 1,
+		};
+		expect(component.handleMouse(streamingClick)?.handled).toBe(true);
+		expect(stripAnsi(component.render(80).join("\n"))).toContain("private reasoning");
+
+		component.updateContent(message, false);
+		const collapsed = component.render(80);
+		const hiddenRow = collapsed.findIndex((line) => stripAnsi(line).includes("Thinking..."));
+		expect(hiddenRow).toBeGreaterThanOrEqual(0);
+		expect(stripAnsi(collapsed.join("\n"))).not.toContain("private reasoning");
+		const click: TuiMouseEvent = {
+			type: "click",
+			button: "left",
+			x: 1,
+			y: hiddenRow,
+			screenX: 1,
+			screenY: hiddenRow,
+			width: 80,
+			height: collapsed.length,
+			shift: false,
+			alt: false,
+			ctrl: false,
+			clickCount: 1,
+		};
+		expect(component.handleMouse(click)?.handled).toBe(true);
+		expect(stripAnsi(component.render(80).join("\n"))).toContain("private reasoning");
+
+		component.setHideThinkingBlock(false);
+		component.invalidate();
+		expect(stripAnsi(component.render(80).join("\n"))).toContain("private reasoning");
+	});
+
+	test("applies completion collapse when installed on replay and waits for real thinking after an empty message", () => {
+		initTheme("dark");
+		const replay = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "thinking", thinking: "replayed reasoning" }]),
+		);
+		replay.setCollapseThinkingOnComplete(true);
+		expect(stripAnsi(replay.render(80).join("\n"))).toContain("Thinking...");
+		expect(stripAnsi(replay.render(80).join("\n"))).not.toContain("replayed reasoning");
+
+		const streamed = new AssistantMessageComponent();
+		streamed.setCollapseThinkingOnComplete(true);
+		streamed.updateContent(createAssistantMessage([{ type: "thinking", thinking: "" }]), false);
+		const message = createAssistantMessage([{ type: "thinking", thinking: "later reasoning" }]);
+		streamed.updateContent(message, true);
+		expect(stripAnsi(streamed.render(80).join("\n"))).toContain("later reasoning");
+		streamed.updateContent(message, false);
+		expect(stripAnsi(streamed.render(80).join("\n"))).not.toContain("later reasoning");
+	});
+
 	test("projects rows after streaming state and message updates", () => {
 		initTheme("dark");
 		const seen: Array<{ streaming: boolean; message: unknown }> = [];

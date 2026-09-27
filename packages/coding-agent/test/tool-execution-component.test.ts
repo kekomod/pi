@@ -1,14 +1,15 @@
 import { join, resolve } from "node:path";
-import { setCapabilities, Text, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { getCapabilities, setCapabilities, Text, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { beforeAll, describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test, vi } from "vitest";
 import { getReadmePath } from "../src/config.ts";
-import type { ToolDefinition } from "../src/core/extensions/types.ts";
+import type { ToolDefinition, ToolGroupMemberRenderContext } from "../src/core/extensions/types.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
 import { withBuiltInRenderers } from "../src/core/tools/renderers/index.ts";
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
+import { ToolGroupCoordinator } from "../src/modes/interactive/components/tool-groups.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -34,6 +35,8 @@ function createFakeTui(): TUI {
 
 const TINY_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+const TINY_JPEG_BASE64 =
+	"/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAACAAIDAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAVAQEBAAAAAAAAAAAAAAAAAAAGCf/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AD3VTB3/2Q==";
 
 describe("ToolExecutionComponent parity", () => {
 	beforeAll(() => {
@@ -498,14 +501,25 @@ describe("ToolExecutionComponent parity", () => {
 	test("keeps image rows in the component tree and exposes geometry and expansion hooks", () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		let clicked = false;
+		const groupContexts: ToolGroupMemberRenderContext[] = [];
+		const imagePositions: Array<{ index: number; isLastImage: boolean }> = [];
+		const coordinator = new ToolGroupCoordinator({
+			groupKey: () => "image-test",
+			renderHeader: () => new Text("group", 0, 0),
+		});
 		const component = new ToolExecutionComponent(
 			"image_tool",
 			"tool-image-hooks",
 			{},
 			{
+				groupCoordinator: coordinator,
 				imagePresentation: {
 					previewHeightCells: 1,
-					render: ({ nativeLines, bounds, hasOverlay }) => {
+					spacingRows: 0,
+					render: ({ nativeLines, bounds, hasOverlay, group, index, isLastImage }, imageTheme) => {
+						if (group) groupContexts.push(group);
+						imagePositions.push({ index, isLastImage });
+						expect(imageTheme).toBe(theme);
 						expect(bounds.height).toBeGreaterThan(0);
 						expect(bounds.width).toBe(80);
 						expect(hasOverlay).toBe(false);
@@ -530,13 +544,35 @@ describe("ToolExecutionComponent parity", () => {
 		);
 		component.updateResult(
 			{
-				content: [{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+				content: [
+					{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" },
+					{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" },
+				],
 				details: undefined,
 				isError: false,
 			},
 			false,
 		);
 		const lines = component.render(80);
+		const callRow = lines.findIndex((line) => stripAnsi(line).includes("image call"));
+		const firstImageRow = lines.findIndex((line) => line.includes("\x1b_G"));
+		expect(firstImageRow - callRow).toBe(1);
+		expect(groupContexts.at(-1)).toMatchObject({ key: "image-test", index: 0, size: 1 });
+		expect(imagePositions).toEqual([
+			{ index: 0, isLastImage: false },
+			{ index: 1, isLastImage: true },
+		]);
+		new ToolExecutionComponent(
+			"second_image_tool",
+			"tool-image-group-follower",
+			{},
+			{ groupCoordinator: coordinator },
+			createBaseToolDefinition("second_image_tool"),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.render(80);
+		expect(groupContexts.at(-1)).toMatchObject({ key: "image-test", index: 0, size: 2 });
 		const imageRow = lines.length - 1;
 		const event: TuiMouseEvent = {
 			type: "click",
@@ -555,6 +591,89 @@ describe("ToolExecutionComponent parity", () => {
 		expect(component.handleMouse(event)?.handled).toBe(true);
 		expect(clicked).toBe(true);
 		setCapabilities({ images: null, trueColor: false, hyperlinks: false });
+	});
+
+	test("native image spacing defaults to one row and stays a bounded nonnegative integer", () => {
+		const originalCapabilities = getCapabilities();
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		const imageGap = (spacingRows: number | undefined): number => {
+			const component = new ToolExecutionComponent(
+				"image_tool",
+				"tool-image-spacing",
+				{},
+				{ imagePresentation: { spacingRows } },
+				{
+					...createBaseToolDefinition("image_tool"),
+					renderShell: "self",
+					renderCall: () => new Text("image call", 0, 0),
+				},
+				createFakeTui(),
+				process.cwd(),
+			);
+			component.updateResult(
+				{
+					content: [{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+					details: undefined,
+					isError: false,
+				},
+				false,
+			);
+			const rows = component.render(80);
+			const callRow = rows.findIndex((line) => stripAnsi(line).includes("image call"));
+			const imageRow = rows.findIndex((line) => line.includes("\x1b_G"));
+			return imageRow - callRow - 1;
+		};
+		try {
+			expect(imageGap(undefined)).toBe(1);
+			expect(imageGap(0)).toBe(0);
+			expect(imageGap(1000)).toBe(10);
+			expect(imageGap(-5)).toBe(0);
+			expect(imageGap(Number.NaN)).toBe(1);
+		} finally {
+			setCapabilities(originalCapabilities);
+		}
+	});
+
+	test("reports attached native image rows to result renderers as conversions complete", async () => {
+		const originalCapabilities = getCapabilities();
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		const imageAvailability: boolean[] = [];
+		const renderResult: NonNullable<ToolDefinition["renderResult"]> = (_result, _options, _resultTheme, context) => {
+			imageAvailability.push(context.hasRenderedImages);
+			return new Text("image result", 0, 0);
+		};
+		const component = new ToolExecutionComponent(
+			"image_tool",
+			"tool-image-availability",
+			{},
+			{},
+			{
+				...createBaseToolDefinition("image_tool"),
+				renderCall: () => new Text("image call", 0, 0),
+				renderResult,
+			},
+			createFakeTui(),
+			process.cwd(),
+		);
+		try {
+			component.updateResult(
+				{
+					content: [{ type: "image", data: TINY_JPEG_BASE64, mimeType: "image/jpeg" }],
+					details: undefined,
+					isError: false,
+				},
+				false,
+			);
+			expect(imageAvailability.at(-1)).toBe(false);
+			await vi.waitFor(() => expect(imageAvailability.at(-1)).toBe(true), { timeout: 3_000 });
+
+			component.setShowImages(false);
+			expect(imageAvailability.at(-1)).toBe(false);
+			component.setShowImages(true);
+			expect(imageAvailability.at(-1)).toBe(true);
+		} finally {
+			setCapabilities(originalCapabilities);
+		}
 	});
 
 	test("image presentation controls native render width with a safe fallback", () => {

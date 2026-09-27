@@ -14,12 +14,14 @@ import {
 } from "@earendil-works/pi-tui";
 import type {
 	ToolDefinition,
+	ToolGroupMemberRenderContext,
 	ToolImagePresentation,
 	ToolImageRenderContext,
 	ToolRenderContext,
 	ToolRenderResultOptions,
 } from "../../../core/extensions/types.ts";
 import type { Theme } from "../theme/theme.ts";
+import type { ToolGroupCoordinator, ToolGroupMemberControl, ToolGroupMembership } from "./tool-groups.ts";
 
 /**
  * What this component needs from a tool: how to draw it. It neither executes tools nor reads their
@@ -45,10 +47,26 @@ import { theme } from "../theme/theme.ts";
 import { keyHint } from "./keybinding-hints.ts";
 
 const FALLBACK_PREVIEW_LINES = 10;
+const DEFAULT_IMAGE_SPACING_ROWS = 1;
+const MAX_IMAGE_SPACING_ROWS = 10;
 
 interface ToolImageHost {
 	renderPresentedImage(image: Image, index: number, width: number): string[];
 	handlePresentedImageMouse(index: number, event: TuiMouseEvent): TuiMouseEventResult | undefined;
+}
+
+class ToolGroupSpacer implements Component {
+	private readonly owner: ToolExecutionComponent;
+
+	constructor(owner: ToolExecutionComponent) {
+		this.owner = owner;
+	}
+
+	render(): string[] {
+		return this.owner.hasGroupLeadingSpacer() ? [""] : [];
+	}
+
+	invalidate(): void {}
 }
 
 function resolveImageRenderWidth(presentation: ToolImagePresentation | undefined, width: number): number {
@@ -61,6 +79,11 @@ function resolveImageRenderWidth(presentation: ToolImagePresentation | undefined
 	} catch {
 		return fallback;
 	}
+}
+
+function resolveImageSpacingRows(value: number | undefined): number {
+	if (value === undefined || !Number.isFinite(value)) return DEFAULT_IMAGE_SPACING_ROWS;
+	return Math.min(MAX_IMAGE_SPACING_ROWS, Math.max(0, Math.floor(value)));
 }
 
 /** Keeps image presentation in the normal Component tree for both shell modes. */
@@ -92,19 +115,23 @@ export interface ToolExecutionOptions {
 	showImages?: boolean;
 	imageWidthCells?: number;
 	imagePresentation?: ToolImagePresentation;
+	groupCoordinator?: ToolGroupCoordinator;
 }
 
-export class ToolExecutionComponent extends Container implements ToolImageHost {
+export class ToolExecutionComponent extends Container implements ToolImageHost, ToolGroupMemberControl {
 	private contentBox: Box;
 	private contentText: Text;
 	private contentTextRegion: MouseRegion;
 	private selfRenderContainer: Container;
+	private selfGroupContainer: Container;
+	private groupHeaderContainer: Container;
 	private selfRenderHeight = 0;
 	private callRendererComponent?: Component;
 	private resultRendererComponent?: Component;
 	private rendererState: any = {};
 	private imageComponents: Image[] = [];
 	private imageViews: ToolImageView[] = [];
+	private lastRenderedImageIndex: number | undefined;
 	private imageSpacers: Spacer[] = [];
 	private imagePresentation?: ToolImagePresentation;
 	private imageFrames = new Map<number, { context: ToolImageRenderContext; lines: string[] }>();
@@ -120,6 +147,8 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 	private ui: TUI;
 	private cwd: string;
 	private executionStarted = false;
+	private executionStartTimeMs: number | undefined;
+	private executionEndTimeMs: number | undefined;
 	private argsComplete = false;
 	private result?: {
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
@@ -128,6 +157,9 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 	};
 	private convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
 	private hideComponent = false;
+	private groupCoordinator?: ToolGroupCoordinator;
+	private groupMembership?: ToolGroupMembership;
+	private initialized = false;
 
 	constructor(
 		toolName: string,
@@ -146,10 +178,12 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 		this.showImages = options.showImages ?? true;
 		this.imageWidthCells = options.imageWidthCells ?? 60;
 		this.imagePresentation = options.imagePresentation;
+		this.groupCoordinator = options.groupCoordinator;
 		this.ui = ui;
 		this.cwd = cwd;
 
-		this.addChild(new Spacer(1));
+		this.addChild(new ToolGroupSpacer(this));
+		this.groupHeaderContainer = new Container();
 
 		// Always create all shell variants. contentBox is used for default renderer-based composition.
 		// selfRenderContainer is used when the tool renders its own framing.
@@ -158,14 +192,80 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 		this.contentText = new Text("", 1, 1, (text: string) => theme.bg("toolPendingBg", text));
 		this.contentTextRegion = this.createResultRegion(this.contentText);
 		this.selfRenderContainer = new Container();
+		this.selfGroupContainer = new Container();
+		this.selfGroupContainer.addChild(this.groupHeaderContainer);
+		this.selfGroupContainer.addChild(this.selfRenderContainer);
 
 		if (this.hasRendererDefinition()) {
-			this.addChild(this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox);
+			if (this.getRenderShell() === "self") {
+				this.addChild(this.selfGroupContainer);
+			} else {
+				this.addChild(this.groupHeaderContainer);
+				this.addChild(this.contentBox);
+			}
 		} else {
+			this.addChild(this.groupHeaderContainer);
 			this.addChild(this.contentTextRegion);
 		}
 
+		if (this.groupCoordinator) this.groupCoordinator.add(this.toolName, this);
+		this.initialized = true;
 		this.updateDisplay();
+	}
+
+	hasGroupLeadingSpacer(): boolean {
+		return this.groupMembership === undefined || this.groupMembership.index === 0;
+	}
+
+	getGroupExpanded(): boolean {
+		return this.expanded;
+	}
+
+	getGroupPending(): boolean {
+		return this.isPartial;
+	}
+
+	getGroupFailed(): boolean {
+		return this.result?.isError ?? false;
+	}
+
+	getGroupStartTimeMs(): number | undefined {
+		return this.executionStartTimeMs;
+	}
+
+	getGroupEndTimeMs(): number | undefined {
+		return this.executionEndTimeMs;
+	}
+
+	setToolGroupMembership(membership: ToolGroupMembership | undefined): void {
+		this.groupMembership = membership;
+		if (this.initialized) {
+			this.updateDisplay(true);
+			this.ui.requestRender();
+		}
+	}
+
+	setToolGroupCoordinator(coordinator: ToolGroupCoordinator | undefined): void {
+		if (this.groupMembership) this.groupMembership.detach();
+		this.groupMembership = undefined;
+		this.groupCoordinator = coordinator;
+		if (coordinator) coordinator.add(this.toolName, this);
+		else if (this.initialized) {
+			this.updateDisplay(true);
+			this.ui.requestRender();
+		}
+	}
+
+	invalidateGroupHeader(): void {
+		this.updateGroupHeader();
+		this.ui.requestRender();
+	}
+
+	private updateGroupHeader(): void {
+		this.groupHeaderContainer.clear();
+		if (this.groupMembership?.index !== 0) return;
+		const header = this.groupMembership.renderHeader(theme);
+		if (header) this.groupHeaderContainer.addChild(header);
 	}
 
 	private getCallRenderer(): ToolDefinition<any, any>["renderCall"] | undefined {
@@ -195,6 +295,7 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 	}
 
 	private getRenderContext(lastComponent: Component | undefined): ToolRenderContext {
+		const group = this.createGroupRenderContext();
 		return {
 			args: this.args,
 			toolCallId: this.toolCallId,
@@ -210,7 +311,23 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 			isPartial: this.isPartial,
 			expanded: this.expanded,
 			showImages: this.showImages,
+			hasRenderedImages: this.imageViews.length > 0,
 			isError: this.result?.isError ?? false,
+			...(group ? { group } : {}),
+		};
+	}
+
+	private createGroupRenderContext(): ToolGroupMemberRenderContext | undefined {
+		const membership = this.groupMembership;
+		if (!membership) return undefined;
+		return {
+			key: membership.key,
+			get index() {
+				return membership.index;
+			},
+			get size() {
+				return membership.size;
+			},
 		};
 	}
 
@@ -247,8 +364,11 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 		this.updateDisplay();
 	}
 
-	markExecutionStarted(): void {
+	markExecutionStarted(startTimeMs?: number): void {
 		this.executionStarted = true;
+		if (this.executionStartTimeMs === undefined && Number.isFinite(startTimeMs)) {
+			this.executionStartTimeMs = startTimeMs;
+		}
 		this.updateDisplay();
 		this.ui.requestRender();
 	}
@@ -266,9 +386,13 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 			isError: boolean;
 		},
 		isPartial = false,
+		endTimeMs?: number,
 	): void {
 		this.result = result;
 		this.isPartial = isPartial;
+		if (!isPartial && this.executionEndTimeMs === undefined && Number.isFinite(endTimeMs)) {
+			this.executionEndTimeMs = endTimeMs;
+		}
 		this.updateDisplay();
 		this.maybeConvertImagesForKitty();
 	}
@@ -314,19 +438,22 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 	renderPresentedImage(image: Image, index: number, width: number): string[] {
 		const renderWidth = resolveImageRenderWidth(this.imagePresentation, width);
 		const nativeLines = image.render(renderWidth);
+		const group = this.createGroupRenderContext();
 		const context: ToolImageRenderContext = {
 			index,
 			width,
 			renderWidth,
 			expanded: this.expanded,
 			hasOverlay: this.ui.hasOverlay(),
+			isLastImage: index === this.lastRenderedImageIndex,
 			nativeLines,
 			bounds: { width: renderWidth, height: nativeLines.length },
+			...(group ? { group } : {}),
 			setExpanded: (expanded) => this.setExpanded(expanded),
 		};
 		let lines: string[];
 		try {
-			lines = this.imagePresentation?.render?.(context) ?? [...nativeLines];
+			lines = this.imagePresentation?.render?.(context, theme) ?? [...nativeLines];
 		} catch {
 			lines = [...nativeLines];
 		}
@@ -361,7 +488,7 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 		}
 
 		if (this.hasRendererDefinition() && this.getRenderShell() === "self") {
-			const contentLines = this.selfRenderContainer.render(width);
+			const contentLines = this.selfGroupContainer.render(width);
 			this.selfRenderHeight = contentLines.length;
 			this.imageLayout = [];
 			if (contentLines.length === 0 && this.imageComponents.length === 0) {
@@ -369,10 +496,10 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 			}
 
 			const lines: string[] = [];
-			if (contentLines.length > 0) {
+			if (this.hasGroupLeadingSpacer() && contentLines.length > 0) {
 				lines.push("");
-				lines.push(...contentLines);
 			}
+			lines.push(...contentLines);
 			for (let i = 0; i < this.imageComponents.length; i++) {
 				const spacer = this.imageSpacers[i];
 				if (spacer) {
@@ -394,10 +521,11 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
 		if (!this.hasRendererDefinition() || this.getRenderShell() !== "self") return super.handleMouse(event);
-		if (event.y > 0 && event.y <= this.selfRenderHeight) {
-			return this.selfRenderContainer.handleMouse({
+		const leading = this.hasGroupLeadingSpacer() ? 1 : 0;
+		if (event.y >= leading && event.y < this.selfRenderHeight + leading) {
+			return this.selfGroupContainer.handleMouse({
 				...event,
-				y: event.y - 1,
+				y: event.y - leading,
 				height: this.selfRenderHeight,
 			});
 		}
@@ -429,7 +557,10 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 		return undefined;
 	}
 
-	private updateDisplay(): void {
+	private updateDisplay(preserveImages = false): void {
+		this.groupMembership?.update(this);
+		this.updateGroupHeader();
+		if (!preserveImages) this.updateImageViews();
 		const bgFn = this.isPartial
 			? (text: string) => theme.bg("toolPendingBg", text)
 			: this.result?.isError
@@ -497,6 +628,12 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 			hasContent = true;
 		}
 
+		if (this.hasRendererDefinition() && !hasContent && this.imageComponents.length === 0) {
+			this.hideComponent = true;
+		}
+	}
+
+	private updateImageViews(): void {
 		for (const img of this.imageComponents) {
 			this.removeChild(img);
 		}
@@ -505,6 +642,7 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 			this.removeChild(imageView);
 		}
 		this.imageViews = [];
+		this.lastRenderedImageIndex = undefined;
 		this.imageFrames.clear();
 		this.imageLayout = [];
 		for (const spacer of this.imageSpacers) {
@@ -523,9 +661,12 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 					const imageMimeType = converted?.mimeType ?? img.mimeType;
 					if (caps.images === "kitty" && imageMimeType !== "image/png") continue;
 
-					const spacer = new Spacer(1);
-					this.addChild(spacer);
-					this.imageSpacers.push(spacer);
+					const spacingRows = resolveImageSpacingRows(this.imagePresentation?.spacingRows);
+					if (spacingRows > 0) {
+						const spacer = new Spacer(spacingRows);
+						this.addChild(spacer);
+						this.imageSpacers.push(spacer);
+					}
 					const imageComponent = new Image(
 						imageData,
 						imageMimeType,
@@ -541,13 +682,10 @@ export class ToolExecutionComponent extends Container implements ToolImageHost {
 					this.imageComponents.push(imageComponent);
 					const imageView = new ToolImageView(this, imageComponent, i);
 					this.imageViews.push(imageView);
+					this.lastRenderedImageIndex = i;
 					this.addChild(imageView);
 				}
 			}
-		}
-
-		if (this.hasRendererDefinition() && !hasContent && this.imageComponents.length === 0) {
-			this.hideComponent = true;
 		}
 	}
 

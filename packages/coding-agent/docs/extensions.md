@@ -923,7 +923,7 @@ Fired when user input is received, after extension commands are checked but befo
 pi.on("input", async (event, ctx) => {
   // event.text - raw input (before skill/template expansion)
   // event.images - attached images, if any
-  // event.source - "interactive" (typed), "rpc" (API), or "extension" (via sendUserMessage)
+  // event.source - "interactive" (typed), "rpc" (API), "extension" (via sendUserMessage), or "remote"
   // event.streamingBehavior - "steer" | "followUp" | undefined
   //   undefined when idle, "steer" for mid-stream interrupts,
   //   "followUp" for messages queued until the agent finishes
@@ -1468,6 +1468,37 @@ When not streaming, the message is sent immediately and triggers a new turn. Whe
 
 See [send-user-message.ts](../examples/extensions/send-user-message.ts) for a complete example.
 
+### pi.getSessionController()
+
+Get a narrow controller for the current live `AgentSession`. The capability is optional in modes
+that do not expose a live session. Call it from an event or command handler, after extension
+initialization has bound the session actions.
+
+```typescript
+const controller = pi.getSessionController?.();
+if (controller) {
+  const snapshot = controller.getSnapshot({ entryLimit: 200 });
+  const unsubscribe = controller.subscribe((event) => {
+    // Consume copied events from the same ordered stream used by the TUI.
+  });
+  const receipt = await controller.prompt("Continue", { deliverAs: "followUp" });
+  if (!receipt.accepted) console.error(receipt.reason);
+  unsubscribe();
+}
+```
+
+Snapshots contain copied active transcript entries, the current streaming message, queue contents,
+session identity, model identity, thinking level, and run state. Model projections omit request
+configuration and credentials. `entryLimit` keeps only the most recent active transcript entries;
+it defaults to 200 and is capped at 1000. Controller subscriptions are removed when the extension
+runtime reloads, the session reloads or ends, or tree navigation changes the active branch. Captured
+controllers become stale after those lifecycle changes or a session identity change.
+
+`prompt()` accepts text or text and image content. It marks input source as `remote` and resolves
+when the existing session preflight accepts or rejects the prompt; later model and tool outcomes
+arrive on the subscribed session event stream. It does not dispatch slash commands or expand
+prompt templates, so callers should route command-like input explicitly.
+
 ### pi.appendEntry(customType, data?)
 
 Persist extension data. Custom entries do NOT participate in LLM context. In interactive mode, they can also render inside the chat transcript when paired with `pi.registerEntryRenderer()`.
@@ -1847,6 +1878,8 @@ pi.registerProvider("corporate-ai", {
 
 The object form accepts a complete pi-ai `Provider`, including native `auth`, `getModels`, `refreshModels`, `filterModels`, `stream`, and `streamSimple` behavior.
 
+Use `externalLogin` in the config form when an extension owns authentication outside Pi. Its `authType` selects the account or API-key entry in `/login`; its handler receives an `ExtensionCommandContext` and owns the flow and completion UI. Pi does not write to its credential store during this flow. This override replaces the provider's regular auth entries in `/login`.
+
 **Legacy config options:**
 - `name` - Display name for the provider in UI such as `/login`.
 - `baseUrl` - API endpoint URL. Required when defining models.
@@ -1857,6 +1890,7 @@ The object form accepts a complete pi-ai `Provider`, including native `auth`, `g
 - `models` - Array of model definitions. If provided, replaces all existing models for this provider. Model definitions can set `baseUrl` to override the provider endpoint for that model.
 - `refreshModels` - Async dynamic discovery callback. Its returned models replace extension-provided models. `context.stored` contains the persisted provider snapshot; use generation-checked `context.publish({ persist: entry })` only when updated catalog data should persist. Use `persist: null` to delete that snapshot.
 - `oauth` - OAuth provider config for `/login` support. When provided, the provider appears in the login menu.
+- `externalLogin` - Provider-owned `/login` handler for authentication managed outside Pi. Set `authType` to `"oauth"` or `"api_key"`; the handler receives `ExtensionCommandContext` and owns completion UI.
 - `streamSimple` - Custom streaming implementation for non-standard APIs.
 
 See [custom-provider.md](custom-provider.md) for advanced topics: custom streaming APIs, OAuth details, model definition reference.

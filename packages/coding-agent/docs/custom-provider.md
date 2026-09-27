@@ -349,6 +349,8 @@ pi.registerProvider("corporate-ai", {
 
 After registration, users can authenticate via `/login corporate-ai`.
 
+When an extension owns authentication outside Pi, use `externalLogin` instead of `oauth`. Its handler receives an `ExtensionCommandContext`, runs the provider-owned flow, and reports completion through that context. Pi does not write to its credential store during this flow. If both are configured, `externalLogin` replaces the provider's native login entries in `/login`.
+
 ### OAuthLoginCallbacks
 
 The `callbacks` object provides UI-neutral interactions for the provider-owned flow:
@@ -683,6 +685,12 @@ interface ProviderConfig {
 
   /** Models to register. If provided, replaces all existing models for this provider. */
   models?: ProviderModelConfig[];
+
+  /** Provider-owned /login flow; Pi does not write to its credential store during this flow. */
+  externalLogin?: {
+    authType: "oauth" | "api_key";
+    handler(context: ExtensionCommandContext): Promise<void>;
+  };
 
   /** OAuth provider for /login support. */
   oauth?: {

@@ -2,6 +2,14 @@
  * Extension system for lifecycle events and custom tools.
  */
 
+export type {
+	SessionController,
+	SessionControllerModel,
+	SessionControllerPromptAcceptance,
+	SessionControllerPromptOptions,
+	SessionControllerSnapshot,
+	SessionControllerSnapshotOptions,
+} from "../session-controller.ts";
 export type { SlashCommandInfo, SlashCommandSource } from "../slash-commands.ts";
 export type { SourceInfo } from "../source-info.ts";
 export {
@@ -84,6 +92,7 @@ export type {
 	GetActiveToolsHandler,
 	GetAllToolsHandler,
 	GetCommandsHandler,
+	GetSessionControllerHandler,
 	GetThinkingLevelHandler,
 	GrepToolCallEvent,
 	GrepToolResultEvent,
@@ -182,6 +191,9 @@ export type {
 	ToolExecutionMode,
 	ToolExecutionStartEvent,
 	ToolExecutionUpdateEvent,
+	ToolGroupMemberRenderContext,
+	ToolGroupPresentation,
+	ToolGroupRenderContext,
 	ToolImageBounds,
 	ToolImagePresentation,
 	ToolImageRenderContext,

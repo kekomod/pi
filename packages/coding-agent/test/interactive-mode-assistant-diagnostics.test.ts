@@ -1,6 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
+import { ToolGroupCoordinator } from "../src/modes/interactive/components/tool-groups.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -44,6 +45,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 			this: {
 				chatContainer: Container;
 				settingsManager: { getShowCacheMissNotices(): boolean };
+				toolGroupCoordinator: ToolGroupCoordinator;
 			},
 			message: AssistantMessage,
 		) => void;
@@ -52,6 +54,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 		const enabled = {
 			chatContainer: new Container(),
 			settingsManager: { getShowCacheMissNotices: () => true },
+			toolGroupCoordinator: new ToolGroupCoordinator(),
 		};
 		maybeShowAssistantDiagnostics.call(enabled, message);
 		const output = stripAnsi(enabled.chatContainer.render(120).join("\n"));
@@ -60,6 +63,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 		const disabled = {
 			chatContainer: new Container(),
 			settingsManager: { getShowCacheMissNotices: () => false },
+			toolGroupCoordinator: new ToolGroupCoordinator(),
 		};
 		maybeShowAssistantDiagnostics.call(disabled, message);
 		expect(disabled.chatContainer.children).toHaveLength(0);
