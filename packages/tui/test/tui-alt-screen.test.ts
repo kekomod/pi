@@ -138,7 +138,51 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
-	it("leaves the scrollbar clickable when the jump-to-end indicator spans the transcript", async () => {
+	it("keeps the jump-to-end indicator centered as the auto scrollbar hides and reappears", async () => {
+		// Regression test for #9136: auto scrollbar visibility must not move the indicator.
+		const terminal = new VirtualTerminal(80, 6);
+		const label = " ↓ Jump to latest message · End ";
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			scrollToEndIndicator: () => label,
+		});
+		const transcript = new ScrollView(
+			new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ follow: "end", primary: true, scrollbar: "auto", scrollbarHideDelayMs: 0 },
+		);
+		tui.setLayoutRoot(transcript);
+		tui.start();
+		try {
+			await terminal.waitForRender();
+
+			// Scrolling over the track keeps the scrollbar visible until the pointer leaves.
+			terminal.sendInput("\x1b[<64;80;1M");
+			await terminal.waitForRender();
+			assert.strictEqual(transcript.isScrollbarVisible, true);
+			assert.strictEqual(transcript.isFollowingEnd, false);
+			const scrollTop = transcript.scrollTop;
+			const visibleColumn = terminal.getViewport()[5].indexOf(label);
+
+			// Leaving the track lets the auto-hide timer expire without changing the content.
+			terminal.sendInput("\x1b[<35;79;1M");
+			await terminal.waitForRender();
+			assert.strictEqual(transcript.isScrollbarVisible, false);
+			assert.strictEqual(transcript.scrollTop, scrollTop);
+			const hiddenColumn = terminal.getViewport()[5].indexOf(label);
+
+			terminal.sendInput("\x1b[<35;80;1M");
+			await terminal.waitForRender();
+			assert.strictEqual(transcript.isScrollbarVisible, true);
+			assert.strictEqual(transcript.scrollTop, scrollTop);
+			const revealedColumn = terminal.getViewport()[5].indexOf(label);
+
+			assert.deepStrictEqual([visibleColumn, hiddenColumn, revealedColumn], [24, 24, 24]);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("leaves the scrollbar visible and clickable when the jump-to-end indicator spans the transcript", async () => {
+		// Regression coverage for #9136: centering must not paint or capture clicks over the scrollbar.
 		const terminal = new VirtualTerminal(30, 6);
 		const tui = new TuiAltScreen(terminal, undefined, undefined, {
 			scrollToEndIndicator: () => "↓".repeat(30),
@@ -161,6 +205,7 @@ describe("TuiAltScreen", () => {
 		assert.strictEqual(transcript.isFollowingEnd, false);
 
 		// The indicator must not intercept a press on the scrollbar's last column.
+		assert.strictEqual(terminal.getViewport()[3], `${"↓".repeat(29)}┃`);
 		terminal.sendInput("\x1b[<0;30;4M");
 		terminal.sendInput("\x1b[<0;30;4m");
 		await terminal.waitForRender();
@@ -1042,6 +1087,54 @@ describe("TuiAltScreen", () => {
 		}
 	});
 
+	it("clears WezTerm rows before redrawing Kitty image placements", async () => {
+		const previousTermProgram = process.env.TERM_PROGRAM;
+		const previousWezTermPane = process.env.WEZTERM_PANE;
+		try {
+			process.env.TERM_PROGRAM = "wezterm";
+			delete process.env.WEZTERM_PANE;
+			setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+			const terminal = new RecordingTerminal(20, 4);
+			const tui = new TuiAltScreen(terminal);
+			try {
+				const imageId = 9876;
+				const imageLine = encodeKitty("AAAA", { columns: 2, rows: 2, imageId, moveCursor: false });
+				registerKittyImageMetadata({ imageId, columns: 2, rows: 2, widthPx: 100, heightPx: 100 });
+				let moved = false;
+				tui.addChild({
+					render: () => (moved ? ["header", imageLine, "footer"] : [imageLine, "footer"]),
+					invalidate: () => {},
+				});
+				tui.start();
+				await terminal.waitForRender();
+
+				const eventCount = terminal.events.length;
+				moved = true;
+				tui.requestRender();
+				await terminal.waitForRender();
+				const redrawWrites = terminal.events
+					.slice(eventCount)
+					.filter((event): event is { type: "write"; data: string } => event.type === "write")
+					.map((event) => event.data)
+					.join("");
+				const lastRowClear = redrawWrites.lastIndexOf("\x1b[2K");
+				const placement = redrawWrites.indexOf("\x1b_Ga=p,q=2");
+
+				assert.ok(lastRowClear >= 0);
+				assert.ok(placement > lastRowClear, "all row clears must precede Kitty image placement");
+				assert.strictEqual(redrawWrites.indexOf("\x1b[2K", placement), -1);
+			} finally {
+				tui.stop();
+			}
+		} finally {
+			if (previousTermProgram === undefined) delete process.env.TERM_PROGRAM;
+			else process.env.TERM_PROGRAM = previousTermProgram;
+			if (previousWezTermPane === undefined) delete process.env.WEZTERM_PANE;
+			else process.env.WEZTERM_PANE = previousWezTermPane;
+			resetCapabilitiesCache();
+		}
+	});
+
 	it("retains recently offscreen Kitty images for placement-only reuse", async () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		try {
@@ -1348,6 +1441,36 @@ describe("TuiAltScreen", () => {
 			"must not emit OSC 52 when a copySelection handler is provided",
 		);
 
+		tui.stop();
+	});
+
+	it("flashes a specific error returned by the injected copySelection handler", async () => {
+		// Regression test for #9618.
+		const terminal = new RecordingTerminal(80, 4);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copyOnSelect: false,
+			copySelection: async () => "Clipboard unavailable: install wl-clipboard",
+		});
+		let flashDuration: number | undefined;
+		const flash = tui.flash.bind(tui);
+		tui.flash = (message, durationMs) => {
+			flashDuration = durationMs;
+			flash(message, durationMs);
+		};
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;4;2M");
+		terminal.sendInput("\x1b[<0;4;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(await tui.copyActiveSelectionToClipboard(), false);
+		await terminal.waitForRender();
+
+		assert.ok(terminal.getViewport().some((line) => line.includes("Clipboard unavailable: install wl-clipboard")));
+		assert.ok(terminal.getViewport().every((line) => !line.includes("Copy failed")));
+		assert.strictEqual(flashDuration, 5000);
 		tui.stop();
 	});
 

@@ -44,8 +44,8 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 				try {
 					await copyToClipboard(text);
 					return true;
-				} catch {
-					return false;
+				} catch (error) {
+					return error instanceof Error ? error.message : String(error);
 				}
 			},
 		});

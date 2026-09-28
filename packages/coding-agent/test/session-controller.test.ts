@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI, SessionController } from "../src/index.ts";
 import { createHarness, getMessageText, type Harness } from "./suite/harness.ts";
 
+const PNG_DATA = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
 function deferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve = (): void => {};
 	const promise = new Promise<void>((done) => {
@@ -63,7 +65,7 @@ describe("live session controller", () => {
 		});
 		const submitted = controller!.prompt([
 			{ type: "text", text: "describe this" },
-			{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" },
+			{ type: "image", mimeType: "image/png", data: PNG_DATA },
 		]);
 		await toolStarted.promise;
 
@@ -71,14 +73,15 @@ describe("live session controller", () => {
 		expect(harness.session.isStreaming).toBe(true);
 		expect(tuiUserMessages).toEqual(["describe this"]);
 		expect(inputSources).toEqual(["remote"]);
-		expect(harness.session.messages[0]?.role).toBe("user");
-		if (harness.session.messages[0]?.role === "user") {
-			const content = harness.session.messages[0].content;
+		const userMessage = harness.session.messages.find((message) => message.role === "user");
+		expect(userMessage).toBeDefined();
+		if (userMessage) {
+			const content = userMessage.content;
 			if (Array.isArray(content)) {
 				expect(content).toContainEqual({
 					type: "image",
 					mimeType: "image/png",
-					data: "ZmFrZQ==",
+					data: PNG_DATA,
 				});
 			}
 		}
@@ -103,18 +106,20 @@ describe("live session controller", () => {
 
 		const snapshot = extensionApi?.getSessionController?.().getSnapshot();
 		expect(snapshot?.sessionId).toBe(harness.session.sessionId);
-		expect(snapshot?.entries).toHaveLength(2);
+		expect(snapshot?.entries).toHaveLength(3);
 		expect(snapshot?.model).toMatchObject({ provider: harness.getModel().provider, id: harness.getModel().id });
 		expect(snapshot?.model).not.toHaveProperty("baseUrl");
 		expect(snapshot?.model).not.toHaveProperty("headers");
-		if (snapshot?.entries[0]?.type === "message" && snapshot.entries[0].message.role === "user") {
-			const content = snapshot.entries[0].message.content;
+		const copiedUser = snapshot?.entries.find((entry) => entry.type === "message" && entry.message.role === "user");
+		expect(copiedUser).toBeDefined();
+		if (copiedUser?.type === "message" && copiedUser.message.role === "user") {
+			const content = copiedUser.message.content;
 			if (Array.isArray(content)) {
 				const textPart = content[0];
 				if (textPart?.type === "text") textPart.text = "mutated snapshot";
 			}
 		}
-		expect(getMessageText(harness.session.messages[0])).toBe("hi");
+		expect(getMessageText(harness.session.messages.find((message) => message.role === "user")!)).toBe("hi");
 		expect(extensionApi?.getSessionController?.().getSnapshot({ entryLimit: 1 }).entries).toHaveLength(1);
 		expect(extensionApi?.getSessionController?.().getSnapshot({ entryLimit: 0 }).entries).toEqual([]);
 
