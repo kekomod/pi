@@ -82,7 +82,9 @@ describe("queued message presentation", () => {
 		expect(output).toContain("Follow one");
 		expect(output).not.toContain("Steering: ");
 		expect(output).not.toContain("Follow-up: ");
-		expect(output).toContain("alt+shift+up to edit all queued messages");
+		const dequeueHint = process.platform === "darwin" ? "⌥⇧↑ Edit queued" : "Alt+⇧+↑ Edit queued";
+		expect(output).toContain(dequeueHint);
+		expect(output).not.toContain("to edit all queued messages");
 		expect(steering).toEqual(["Steer one", "Steer two"]);
 		expect(followUp).toEqual(["Follow one"]);
 	});

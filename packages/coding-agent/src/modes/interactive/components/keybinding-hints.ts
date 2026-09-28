@@ -43,6 +43,55 @@ export function keyHint(keybinding: Keybinding, description: string): string {
 	return theme.fg("dim", keyText(keybinding)) + theme.fg("muted", ` ${description}`);
 }
 
+function compactKeyPart(part: string): string {
+	const key = part.toLowerCase();
+	const symbol = (
+		{
+			up: "↑",
+			down: "↓",
+			left: "←",
+			right: "→",
+			shift: "⇧",
+			return: "↵",
+			enter: "↵",
+			backspace: "⌫",
+			delete: "⌦",
+			escape: "⎋",
+			tab: "⇥",
+		} as Record<string, string>
+	)[key];
+	if (symbol) return symbol;
+	if (process.platform === "darwin") {
+		const macModifier = (
+			{
+				alt: "⌥",
+				option: "⌥",
+				ctrl: "⌃",
+				control: "⌃",
+				meta: "⌘",
+				cmd: "⌘",
+				command: "⌘",
+			} as Record<string, string>
+		)[key];
+		if (macModifier) return macModifier;
+	}
+	return formatKeyPart(part, { capitalize: true });
+}
+
+/** Render a short key hint with platform-appropriate modifier symbols. */
+export function compactKeyHint(key: string, description: string): string {
+	const display = key
+		.split("/")
+		.map((chord) =>
+			chord
+				.split("+")
+				.map(compactKeyPart)
+				.join(process.platform === "darwin" ? "" : "+"),
+		)
+		.join("/");
+	return theme.fg("dim", display) + theme.fg("muted", ` ${description}`);
+}
+
 export function rawKeyHint(key: string, description: string): string {
 	return theme.fg("dim", formatKeyText(key)) + theme.fg("muted", ` ${description}`);
 }
