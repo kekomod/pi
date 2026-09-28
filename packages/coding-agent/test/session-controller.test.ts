@@ -248,4 +248,48 @@ describe("live session controller", () => {
 		expect(() => controller.clearQueue()).toThrow(/stale/i);
 		expect(harness.session.getSessionController().getSnapshot().sessionId).toBe(harness.session.sessionId);
 	});
+
+	it("retains controllers after canceled navigation and rejects prompts while navigation is pending", async () => {
+		const entered = deferred();
+		const release = deferred();
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_tree", async () => {
+						entered.resolve();
+						await release.promise;
+						return { cancel: true };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("after cancellation")]);
+		await harness.session.prompt("first question");
+		const target = harness.session.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "message" && entry.message.role === "user");
+		expect(target).toBeDefined();
+		const controller = harness.session.getSessionController();
+		const before = controller.getSnapshot();
+		let eventCount = 0;
+		controller.subscribe(() => eventCount++);
+		const navigating = harness.session.navigateTree(target!.id);
+		await entered.promise;
+		try {
+			expect(controller.getSnapshot().isCompacting).toBe(true);
+			expect(await controller.prompt("during navigation")).toEqual({
+				accepted: false,
+				reason: "Cannot submit a prompt while session tree navigation is in progress.",
+			});
+		} finally {
+			release.resolve();
+		}
+		expect(await navigating).toEqual({ cancelled: true });
+		expect(controller.getSnapshot().entries).toEqual(before.entries);
+		harness.session.setSessionName("still attached");
+		expect(eventCount).toBeGreaterThan(0);
+		expect(await controller.prompt("after navigation")).toEqual({ accepted: true });
+		await harness.session.waitForIdle();
+	});
 });

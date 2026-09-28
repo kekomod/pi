@@ -1353,7 +1353,12 @@ export class AgentSession {
 						images,
 						streamingBehavior: options?.deliverAs,
 						source: "remote",
-						preflightValidation: assertActive,
+						preflightValidation: () => {
+							assertActive();
+							if (this._branchSummaryAbortController) {
+								throw new Error("Cannot submit a prompt while session tree navigation is in progress.");
+							}
+						},
 						preflightResult: (succeeded) => {
 							if (!succeeded) return;
 							accepted = true;
@@ -3779,8 +3784,6 @@ export class AgentSession {
 		if (!targetEntry) {
 			throw new Error(`Entry ${targetId} not found`);
 		}
-		this._invalidateSessionControllers();
-
 		// Collect entries to summarize (from old leaf to common ancestor)
 		const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(
 			this.sessionManager,
@@ -3898,6 +3901,7 @@ export class AgentSession {
 
 			// Switch leaf (with or without summary)
 			// Summary is attached at the navigation target position (newLeafId), not the old branch
+			this._invalidateSessionControllers();
 			let summaryEntry: BranchSummaryEntry | undefined;
 			if (summaryText) {
 				// Create summary at target position (can be null for root)
