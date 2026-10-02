@@ -2074,6 +2074,13 @@ export interface ExtensionAPI {
 	// =========================================================================
 
 	/**
+	 * Wait for one configured or registered MCP server to connect. A caller's signal cancels only its
+	 * wait; it does not cancel the shared server connection. Rejects when native MCP support is
+	 * unavailable, the server is missing or disabled, its connection fails, or the session ends.
+	 */
+	waitForMcpServer(name: string, options?: { signal?: AbortSignal }): Promise<void>;
+
+	/**
 	 * Register an MCP server for this session, with the same config as an `mcpServers` entry in
 	 * `mcp.json`. The server connects next to the configured servers: on `session_start` when
 	 * registered during extension load, right away when registered later. Registering a name again

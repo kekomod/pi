@@ -15,6 +15,7 @@ import { resolvePath } from "../../utils/paths.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
+import { waitForMcpServer as waitForNativeMcpServer } from "../mcp-server-readiness.ts";
 import { type McpServerConfig, McpServerRegistry, mcpNamespace, validateMcpServerConfig } from "../mcp-servers.ts";
 import { readPiManifest } from "../pi-manifest.ts";
 import { createSyntheticSourceInfo, getSyntheticPathSource, isSyntheticPath } from "../source-info.ts";
@@ -494,6 +495,11 @@ function createExtensionAPI(
 		setThinkingLevel(level) {
 			assertActive();
 			runtime.setThinkingLevel(level);
+		},
+
+		waitForMcpServer(name, options = {}) {
+			assertActive();
+			return waitForNativeMcpServer(eventBus, name, options.signal);
 		},
 
 		registerProvider(providerOrName: Provider | string, config?: ProviderConfig) {

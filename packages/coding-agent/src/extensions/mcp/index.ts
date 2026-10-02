@@ -37,6 +37,7 @@ import type {
 	ExtensionFactory,
 	ToolDefinition,
 } from "../../core/extensions/types.ts";
+import { registerMcpServerReadinessResolver } from "../../core/mcp-server-readiness.ts";
 import { mcpNamespace } from "../../core/mcp-servers.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
@@ -289,6 +290,8 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 		const startupWaitMs = options.startupWaitMs ?? DEFAULT_STARTUP_WAIT_MS;
 		/** Bumped on every session start and shutdown so a runtime load that resolves late is dropped. */
 		let generation = 0;
+		/** Cancels readiness waits when this session is replaced or shut down. */
+		let sessionController = new AbortController();
 		/** Working directory of the session, for stdio servers. */
 		let sessionCwd = process.cwd();
 		let credentials = options.credentials;
@@ -559,6 +562,33 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 			]);
 			if (onAbort) signal?.removeEventListener("abort", onAbort);
 		};
+
+		const waitForMcpServer = async (name: string, signal?: AbortSignal): Promise<void> => {
+			signal?.throwIfAborted();
+			if (!sessionActive) throw new Error(`Cannot wait for MCP server "${name}" without an active session.`);
+			const current = generation;
+			const server =
+				servers.find((candidate) => candidate.entry.name === name) ??
+				servers.find((candidate) => mcpNamespace(candidate.entry.name) === mcpNamespace(name));
+			if (!server) throw new Error(`MCP server "${name}" is not configured or registered.`);
+			if (!isEnabled(server)) throw new Error(`MCP server "${name}" is disabled. Enable it in /mcp first.`);
+
+			const sessionSignal = sessionController.signal;
+			const waitingSignal = signal ? AbortSignal.any([signal, sessionSignal]) : sessionSignal;
+			await waitForServers([server], waitingSignal);
+			signal?.throwIfAborted();
+			sessionSignal.throwIfAborted();
+			if (!sessionActive || current !== generation || !servers.includes(server)) {
+				throw new Error(`MCP server "${name}" changed while waiting for it to connect.`);
+			}
+
+			const connection = server.connection;
+			if (connection?.state !== "connected") {
+				const state = connection ? describeState(server) : (server.message ?? "failed to start");
+				throw new Error(`MCP server "${name}" is unavailable: ${state}.`);
+			}
+		};
+		registerMcpServerReadinessResolver(pi.events, waitForMcpServer);
 
 		/**
 		 * One message for everything that needs the user after startup, or only for `only`, servers
@@ -952,6 +982,8 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 		};
 
 		pi.on("session_start", (_event, ctx) => {
+			sessionController.abort(new Error("MCP session changed"));
+			sessionController = new AbortController();
 			const loaded = (options.loadConfig ?? defaultLoadConfig)(ctx);
 			configErrors = loaded.errors;
 			autoEnableCodemode = loaded.autoEnableCodemode ?? true;
@@ -1068,11 +1100,13 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 			servers.push(...added);
 			emitChange();
 			ensureDiscoveryActive(ctx);
-			await Promise.all(removed.map((server) => server.connection?.close()));
+			const closing = Promise.all(removed.map((server) => server.connection?.close()));
 			const connecting = added.filter(isEnabled);
+			const starting = connecting.map((server) => startConnection(server, () => current === generation, closing));
+			await closing;
 			if (current !== generation || connecting.length === 0) return;
 			try {
-				await Promise.all(connecting.map((server) => startConnection(server, () => current === generation)));
+				await Promise.all(starting);
 				if (current !== generation) {
 					await Promise.all(connecting.map((server) => server.connection?.close()));
 					return;
@@ -1087,6 +1121,7 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 
 		pi.on("session_shutdown", async () => {
 			sessionActive = false;
+			sessionController.abort(new Error("MCP session ended"));
 			generation++;
 			const closing = connections();
 			servers = [];

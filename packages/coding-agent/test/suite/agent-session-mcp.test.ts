@@ -882,7 +882,11 @@ describe("AgentSession MCP servers registered by extensions", () => {
 	});
 
 	/** `configured` are the mcp.json servers; `plugins` register servers through the extension API. */
-	async function setup(plugins: ExtensionFactory | ExtensionFactory[], configured: McpServerEntry[] = []) {
+	async function setup(
+		plugins: ExtensionFactory | ExtensionFactory[],
+		configured: McpServerEntry[] = [],
+		initializeDelayMs: (entry: McpServerEntry) => number = () => 0,
+	) {
 		const connected: McpServerEntry[] = [];
 		const harness = await createHarness({
 			initialActiveToolNames: [],
@@ -893,7 +897,7 @@ describe("AgentSession MCP servers registered by extensions", () => {
 					loadConfig: () => ({ servers: configured, errors: [] }),
 					createTransport: (entry) => {
 						connected.push(entry);
-						const pair = createFakeServer([]);
+						const pair = createFakeServer([], { initializeDelayMs: initializeDelayMs(entry) });
 						void pair.server.start();
 						return pair.client;
 					},
@@ -935,6 +939,66 @@ describe("AgentSession MCP servers registered by extensions", () => {
 		await vi.waitFor(() => expect(harness.session.getCallableToolNames()).not.toContain("mcp__late__search"));
 	});
 
+	it("waits for only the requested server and cancels one caller without cancelling the connection", async () => {
+		let api: ExtensionAPI | undefined;
+		const slow: McpServerEntry = {
+			name: "slow",
+			config: { url: "http://slow.invalid" },
+			source: "mcp.json",
+		};
+		const { harness, connected } = await setup(
+			(pi) => {
+				api = pi;
+			},
+			[slow],
+			(entry) => (entry.name === "slow" ? Number.POSITIVE_INFINITY : 25),
+		);
+		if (!api) throw new Error("No extension API");
+
+		api.registerMcpServer("late", { url: "http://late.invalid" });
+		const controller = new AbortController();
+		const cancelled = api.waitForMcpServer("late", { signal: controller.signal });
+		const ready = api.waitForMcpServer("late");
+		controller.abort(new Error("caller stopped waiting"));
+
+		await expect(cancelled).rejects.toThrow("caller stopped waiting");
+		await expect(ready).resolves.toBeUndefined();
+		expect(connected.map((entry) => entry.name)).toContain("late");
+		// The unrelated server can remain pending while the selected server becomes ready.
+		expect(harness.session.getCallableToolNames()).toContain("mcp__late__search");
+	});
+
+	it("reports missing, disabled, and unavailable native MCP support", async () => {
+		let api: ExtensionAPI | undefined;
+		const disabled: McpServerEntry = {
+			name: "disabled",
+			config: { url: "http://disabled.invalid", enabled: false },
+			source: "mcp.json",
+		};
+		await setup(
+			(pi) => {
+				api = pi;
+			},
+			[disabled],
+		);
+		if (!api) throw new Error("No extension API");
+		await expect(api.waitForMcpServer("missing")).rejects.toThrow(/not configured or registered/u);
+		await expect(api.waitForMcpServer("disabled")).rejects.toThrow(/disabled/u);
+
+		let apiWithoutMcp: ExtensionAPI | undefined;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					apiWithoutMcp = pi;
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({ uiContext: createTestUiContext() });
+		if (!apiWithoutMcp) throw new Error("No extension API");
+		await expect(apiWithoutMcp.waitForMcpServer("docs")).rejects.toThrow(/built-in MCP extension is unavailable/u);
+	});
+
 	// "my_docs" shares the namespace of "my-docs" (#10239).
 	it.each(["my-docs", "my_docs"])("prefers the mcp.json server over a registered %s", async (name) => {
 		const configured: McpServerEntry = {
@@ -951,6 +1015,26 @@ describe("AgentSession MCP servers registered by extensions", () => {
 		await vi.waitFor(() => expect(connected).toEqual([configured]));
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(connected).toEqual([configured]);
+	});
+
+	it("waits for the configured server when a registered name shares its native namespace", async () => {
+		let api: ExtensionAPI | undefined;
+		const configured: McpServerEntry = {
+			name: "my-docs",
+			config: { url: "http://config.invalid" },
+			source: "mcp.json",
+		};
+		const { connected } = await setup(
+			(pi) => {
+				api = pi;
+				pi.registerMcpServer("my_docs", { url: "http://plugin.invalid" });
+			},
+			[configured],
+		);
+		if (!api) throw new Error("No extension API");
+
+		await expect(api.waitForMcpServer("my_docs")).resolves.toBeUndefined();
+		expect(connected.map((entry) => entry.name)).toEqual(["my-docs"]);
 	});
 
 	it("rejects names another extension registered", async () => {
