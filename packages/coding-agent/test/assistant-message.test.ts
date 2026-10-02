@@ -1,5 +1,5 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { TuiMouseEvent } from "@earendil-works/pi-tui";
+import { Text, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
@@ -190,6 +190,104 @@ describe("AssistantMessageComponent", () => {
 		expect(streamingStates).toEqual([true, false]);
 	});
 
+	test("completion hides a thinking run opened while streaming and preserves later choices across invalidation", () => {
+		initTheme("dark");
+		const message = createAssistantMessage([
+			{ type: "thinking", thinking: "private reasoning" },
+			{ type: "text", text: "answer" },
+		]);
+		const component = new AssistantMessageComponent(undefined, true);
+		component.setCollapseThinkingOnComplete(true);
+		component.updateContent(message, true);
+		const streaming = component.render(80);
+		const streamingHiddenRow = streaming.findIndex((line) => stripAnsi(line).includes("Thinking..."));
+		expect(streamingHiddenRow).toBeGreaterThanOrEqual(0);
+		const streamingClick: TuiMouseEvent = {
+			type: "click",
+			button: "left",
+			x: 1,
+			y: streamingHiddenRow,
+			screenX: 1,
+			screenY: streamingHiddenRow,
+			width: 80,
+			height: streaming.length,
+			shift: false,
+			alt: false,
+			ctrl: false,
+			clickCount: 1,
+		};
+		expect(component.handleMouse(streamingClick)?.handled).toBe(true);
+		expect(stripAnsi(component.render(80).join("\n"))).toContain("private reasoning");
+
+		component.updateContent(message, false);
+		const collapsed = component.render(80);
+		const hiddenRow = collapsed.findIndex((line) => stripAnsi(line).includes("Thinking..."));
+		expect(hiddenRow).toBeGreaterThanOrEqual(0);
+		expect(stripAnsi(collapsed.join("\n"))).not.toContain("private reasoning");
+		const click: TuiMouseEvent = {
+			type: "click",
+			button: "left",
+			x: 1,
+			y: hiddenRow,
+			screenX: 1,
+			screenY: hiddenRow,
+			width: 80,
+			height: collapsed.length,
+			shift: false,
+			alt: false,
+			ctrl: false,
+			clickCount: 1,
+		};
+		expect(component.handleMouse(click)?.handled).toBe(true);
+		expect(stripAnsi(component.render(80).join("\n"))).toContain("private reasoning");
+
+		component.setHideThinkingBlock(false);
+		component.invalidate();
+		expect(stripAnsi(component.render(80).join("\n"))).toContain("private reasoning");
+	});
+
+	test("applies completion collapse when installed on replay and waits for real thinking after an empty message", () => {
+		initTheme("dark");
+		const replay = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "thinking", thinking: "replayed reasoning" }]),
+		);
+		replay.setCollapseThinkingOnComplete(true);
+		expect(stripAnsi(replay.render(80).join("\n"))).toContain("Thinking...");
+		expect(stripAnsi(replay.render(80).join("\n"))).not.toContain("replayed reasoning");
+
+		const streamed = new AssistantMessageComponent();
+		streamed.setCollapseThinkingOnComplete(true);
+		streamed.updateContent(createAssistantMessage([{ type: "thinking", thinking: "" }]), false);
+		const message = createAssistantMessage([{ type: "thinking", thinking: "later reasoning" }]);
+		streamed.updateContent(message, true);
+		expect(stripAnsi(streamed.render(80).join("\n"))).toContain("later reasoning");
+		streamed.updateContent(message, false);
+		expect(stripAnsi(streamed.render(80).join("\n"))).not.toContain("later reasoning");
+	});
+
+	test("projects rows after streaming state and message updates", () => {
+		initTheme("dark");
+		const seen: Array<{ streaming: boolean; message: unknown }> = [];
+		const first = createAssistantMessage([{ type: "text", text: "first" }]);
+		const second = createAssistantMessage([{ type: "text", text: "second" }]);
+		const component = new AssistantMessageComponent(first);
+		component.addRenderProjection(({ nativeLines, isStreaming, message }) => {
+			seen.push({ streaming: isStreaming, message });
+			return nativeLines.map((line) => `${line} [projected]`);
+		});
+
+		component.render(40);
+		component.updateContent(second, true);
+		const rendered = stripAnsi(component.render(40).join("\n"));
+
+		expect(rendered).toContain("second");
+		expect(rendered).toContain("[projected]");
+		expect(seen).toHaveLength(2);
+		expect(seen[0]?.streaming).toBe(false);
+		expect(seen[1]?.streaming).toBe(true);
+		expect(seen[1]?.message).toBe(second);
+	});
+
 	test("reapplies Markdown transformers when available width changes", () => {
 		initTheme("dark");
 		const availableWidths: number[] = [];
@@ -240,6 +338,38 @@ describe("AssistantMessageComponent", () => {
 
 		expect(stripAnsi(component.render(80).join("\n"))).toContain("remains visible after error");
 		expect(calls).toEqual(["first", "throw", "last"]);
+	});
+
+	test("configures native thinking regions without replacing message geometry", () => {
+		initTheme("dark");
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([
+				{ type: "thinking", thinking: "private reasoning" },
+				{ type: "text", text: "answer" },
+			]),
+		);
+		component.setOutputPadding(({ width }) => (width < 60 ? 0 : 2));
+		component.addLeadingComponent(() => new Text("leading component", 0, 0));
+		component.addRegionPresentation(({ region }) =>
+			region === "thinking"
+				? {
+						leadingSpacing: 1,
+						markdownTheme: { bold: (text) => text },
+						defaultTextStyle: { italic: true },
+						markdownOptions: {
+							renderToken: ({ token, renderNative }) =>
+								token.type === "paragraph"
+									? renderNative().map((line) => `${line} [thinking hook]`)
+									: undefined,
+						},
+					}
+				: undefined,
+		);
+
+		const rendered = stripAnsi(component.render(50).join("\n"));
+		expect(rendered).toContain("leading component");
+		expect(rendered).toContain("private reasoning [thinking hook]");
+		expect(rendered).toContain("answer");
 	});
 
 	test("transforms text and thinking Markdown without mutating the original message", () => {

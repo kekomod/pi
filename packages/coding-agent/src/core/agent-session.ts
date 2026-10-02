@@ -119,6 +119,13 @@ import type { ModelRuntime } from "./model-runtime.ts";
 import { NestedToolCallRunner } from "./nested-tool-calls.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
+import {
+	projectSessionControllerModel,
+	type SessionController,
+	type SessionControllerPromptAcceptance,
+	type SessionControllerSnapshotOptions,
+	sessionControllerErrorReason,
+} from "./session-controller.ts";
 import { exportSessionToJsonl } from "./session-export.ts";
 import {
 	type BranchSummaryEntry,
@@ -204,6 +211,11 @@ export type AgentSessionEvent =
 	| { type: "entry_appended"; entry: SessionEntry }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
+	| {
+			type: "model_changed";
+			model: { provider: string; id: string; name: string };
+			source: "set" | "cycle" | "restore";
+	  }
 	| {
 			type: "compaction_end";
 			reason: "manual" | "threshold" | "overflow";
@@ -306,6 +318,8 @@ export interface PromptOptions {
 	source?: InputSource;
 	/** Internal hook used by RPC mode to observe how an accepted prompt was dispatched. Not called if the prompt is rejected. */
 	preflightResult?: (disposition: PromptDisposition) => void;
+	/** Internal guard for prompts submitted through a session-bound controller. */
+	preflightValidation?: () => void;
 }
 
 /** Options for model/thinking mutations. */
@@ -369,6 +383,9 @@ export class AgentSession {
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
+	private _disposed = false;
+	private _sessionControllerGeneration = 0;
+	private _sessionControllerSubscriptions = new Set<() => void>();
 	private _isAgentRunActive = false;
 	private _agentRunAbortRequested = false;
 	private _idleWaitPromise: Promise<void> | undefined;
@@ -1348,6 +1365,13 @@ export class AgentSession {
 		};
 	}
 
+	private _invalidateSessionControllers(): void {
+		this._sessionControllerGeneration++;
+		for (const unsubscribe of [...this._sessionControllerSubscriptions]) {
+			unsubscribe();
+		}
+	}
+
 	/** Disconnect from agent events during disposal. */
 	private _disconnectFromAgent(): void {
 		if (this._unsubscribeAgent) {
@@ -1361,6 +1385,9 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		if (this._disposed) return;
+		this._disposed = true;
+		this._invalidateSessionControllers();
 		try {
 			this.abortRetry();
 			this.abortCompaction();
@@ -1429,6 +1456,137 @@ export class AgentSession {
 	/** Whether the session is currently processing an agent run or post-run continuation. */
 	get isStreaming(): boolean {
 		return this._isAgentRunActive;
+	}
+
+	/** Create a narrow, copied controller for this live AgentSession. */
+	getSessionController(): SessionController {
+		const sessionId = this.sessionId;
+		const generation = this._sessionControllerGeneration;
+		const isCurrent = (): boolean =>
+			!this._disposed && this.sessionId === sessionId && this._sessionControllerGeneration === generation;
+		const assertActive = (): void => {
+			if (!isCurrent()) {
+				throw new Error("This session controller is stale because its session context has changed.");
+			}
+		};
+
+		return {
+			getSnapshot: (options?: SessionControllerSnapshotOptions) => {
+				assertActive();
+				let entries = this.sessionManager.buildContextEntries();
+				const requested =
+					options?.entryLimit === undefined
+						? 200
+						: Number.isFinite(options.entryLimit)
+							? Math.floor(options.entryLimit)
+							: 200;
+				const limit = Math.max(0, Math.min(1000, requested));
+				entries = limit === 0 ? [] : entries.slice(-limit);
+				const model = projectSessionControllerModel(this.model);
+				const streamingMessage = this.agent.state.streamingMessage;
+				return structuredClone({
+					sessionId: this.sessionId,
+					...(this.sessionName === undefined ? {} : { sessionName: this.sessionName }),
+					...(model === undefined ? {} : { model }),
+					thinkingLevel: this.thinkingLevel,
+					isStreaming: this.isStreaming,
+					isCompacting: this.isCompacting,
+					entries,
+					...(streamingMessage === undefined ? {} : { streamingMessage }),
+					queue: {
+						steering: [...this._steeringMessages],
+						followUp: [...this._followUpMessages],
+					},
+				});
+			},
+			subscribe: (listener) => {
+				assertActive();
+				let active = true;
+				let unsubscribeSession = (): void => {};
+				const unsubscribe = (): void => {
+					if (!active) return;
+					active = false;
+					unsubscribeSession();
+					this._sessionControllerSubscriptions.delete(unsubscribe);
+				};
+				unsubscribeSession = this.subscribe((event) => {
+					if (!active) return;
+					if (!isCurrent()) {
+						unsubscribe();
+						return;
+					}
+					try {
+						listener(structuredClone(event));
+					} catch {
+						// Isolate subscriber failures from the session event stream.
+					}
+				});
+				this._sessionControllerSubscriptions.add(unsubscribe);
+				return unsubscribe;
+			},
+			prompt: (content, options) => {
+				assertActive();
+				let text: string;
+				let images: ImageContent[] | undefined;
+				if (typeof content === "string") {
+					text = content;
+				} else {
+					const textParts: string[] = [];
+					images = [];
+					for (const part of content) {
+						if (part.type === "text") textParts.push(part.text);
+						else images.push(structuredClone(part));
+					}
+					text = textParts.join("\n");
+					if (images.length === 0) images = undefined;
+				}
+
+				return new Promise<SessionControllerPromptAcceptance>((resolve) => {
+					let accepted = false;
+					let settled = false;
+					const settle = (result: SessionControllerPromptAcceptance): void => {
+						if (settled) return;
+						settled = true;
+						resolve(result);
+					};
+					void this.prompt(text, {
+						expandPromptTemplates: false,
+						images,
+						streamingBehavior: options?.deliverAs,
+						source: "remote",
+						preflightValidation: () => {
+							assertActive();
+							if (this._branchSummaryAbortController) {
+								throw new Error("Cannot submit a prompt while session tree navigation is in progress.");
+							}
+						},
+						preflightResult: () => {
+							accepted = true;
+							settle({ accepted: true });
+						},
+					})
+						.then(() => {
+							settle(
+								accepted
+									? { accepted: true }
+									: { accepted: false, reason: "Prompt was rejected before acceptance" },
+							);
+						})
+						.catch((error: unknown) => {
+							if (!accepted) settle({ accepted: false, reason: sessionControllerErrorReason(error) });
+						});
+				});
+			},
+			abort: async () => {
+				assertActive();
+				await this.abort();
+			},
+			clearQueue: () => {
+				assertActive();
+				const queue = this.clearQueue();
+				return { steering: [...queue.steering], followUp: [...queue.followUp] };
+			},
+		};
 	}
 
 	/** Whether the session has no active agent run, compaction, branch summary, retry, or queued continuation. */
@@ -1925,12 +2083,14 @@ export class AgentSession {
 		}
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
-		// Handle extension commands first (execute immediately, even during streaming)
-		// Extension commands manage their own LLM interaction via pi.sendMessage()
+		const preflightValidation = options?.preflightValidation;
+		preflightValidation?.();
+
+		// Extension commands execute immediately, including while the agent is streaming.
 		if (expandPromptTemplates && text.startsWith("/")) {
 			const handled = await this._tryExecuteExtensionCommand(text);
+			preflightValidation?.();
 			if (handled) {
-				// Extension command executed, no prompt to send
 				preflightResult?.("handled");
 				return;
 			}
@@ -1942,27 +2102,25 @@ export class AgentSession {
 			);
 		}
 
-		// Emit input event for extension interception (before skill/template expansion)
 		const processedInput = await this._runInputHandlers(
 			text,
 			options?.images,
 			options?.source ?? "interactive",
 			this.isStreaming ? options?.streamingBehavior : undefined,
 		);
+		preflightValidation?.();
 		if (!processedInput) {
 			preflightResult?.("handled");
 			return;
 		}
 		const { text: currentText, images: currentImages } = processedInput;
 
-		// Expand skill commands (/skill:name args) and prompt templates (/template args)
 		let expandedText = currentText;
 		if (expandPromptTemplates) {
 			expandedText = this._expandSkillCommand(expandedText);
 			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 		}
 
-		// If streaming, queue via steer() or followUp() based on option
 		if (this.isStreaming) {
 			if (!options?.streamingBehavior) {
 				throw new Error(
@@ -1974,15 +2132,15 @@ export class AgentSession {
 			} else {
 				await this._queueSteer(expandedText, currentImages);
 			}
+			preflightValidation?.();
 			preflightResult?.("queued");
 			return;
 		}
 
-		// Flush any pending bash and custom messages before the new prompt
+		preflightValidation?.();
 		this._flushPendingBashMessages();
 		this._flushPendingCustomMessages();
 
-		// Validate model
 		if (!this.model) {
 			throw new Error(formatNoModelSelectedMessage());
 		}
@@ -1990,45 +2148,42 @@ export class AgentSession {
 		const hasConfiguredAuth =
 			this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
 			(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
+		preflightValidation?.();
 		if (!hasConfiguredAuth) {
 			const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
 			if (isOAuth) {
 				throw new Error(
-					`Authentication failed for "${this.model.provider}". ` +
-						`Credentials may have expired or network is unavailable. ` +
-						`Run '/login ${this.model.provider}' to re-authenticate.`,
+					'Authentication failed for "' +
+						this.model.provider +
+						"\". Credentials may have expired or network is unavailable. Run '/login " +
+						this.model.provider +
+						"' to re-authenticate.",
 				);
 			}
 			throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 		}
 
-		// Check if we need to compact before sending (catches aborted responses).
-		// The user's new prompt is sent below, so do not call agent.continue() here.
 		const lastAssistant = this._findLastAssistantMessage();
 		if (lastAssistant) {
 			await this._checkCompaction(lastAssistant, false);
 		}
+		preflightValidation?.();
 
-		// Emit before_agent_start before normalizing images so extension-driven model
-		// selection determines the resize profile used for the request and history.
 		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
 		const result = await this._extensionRunner.emitBeforeAgentStart(
 			expandedText,
 			currentImages,
 			this._baseSystemPromptOptions,
 		);
-		// Handlers may edit event.systemPromptOptions.selectedTools or call setActiveTools(),
-		// which updates the live loadout instead. An explicit edit wins; otherwise the live
-		// loadout is authoritative, so a setActiveTools() call is not undone here.
+		preflightValidation?.();
 		const handlerEditedTools =
 			result.systemPromptOptions.selectedTools.length !== selectedToolsBefore.length ||
 			result.systemPromptOptions.selectedTools.some((name, index) => name !== selectedToolsBefore[index]);
 		if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolNames();
 
 		const normalized = await this._normalizePromptImages(currentImages);
+		preflightValidation?.();
 		const userText = normalized.hints.length > 0 ? `${expandedText}\n\n${normalized.hints.join("\n")}` : expandedText;
-
-		// Build messages only after hooks and image normalization have completed.
 		const messages: AgentMessage[] = [];
 		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: userText }];
 		userContent.push(...normalized.images);
@@ -2038,7 +2193,6 @@ export class AgentSession {
 			timestamp: Date.now(),
 		});
 
-		// Inject any pending "nextTurn" messages as context alongside the user message
 		for (const msg of this._pendingNextTurnMessages) {
 			messages.push(msg);
 		}
@@ -2048,7 +2202,6 @@ export class AgentSession {
 			messages.push({
 				role: "custom",
 				customType: msg.customType,
-				// Untyped extensions can pass null/missing content; normalize at ingestion.
 				content: msg.content ?? [],
 				display: msg.display,
 				details: msg.details,
@@ -2059,6 +2212,7 @@ export class AgentSession {
 		this._runSystemPromptOptions = result.systemPromptOptions;
 		if (updateMessage) messages.unshift(updateMessage);
 
+		preflightValidation?.();
 		preflightResult?.("started");
 		await this._runAgentPrompt(messages);
 	}
@@ -2413,6 +2567,11 @@ export class AgentSession {
 		source: "set" | "cycle" | "restore",
 	): Promise<void> {
 		if (modelsAreEqual(previousModel, nextModel)) return;
+		this._emit({
+			type: "model_changed",
+			model: { provider: nextModel.provider, id: nextModel.id, name: nextModel.name },
+			source,
+		});
 		await this._extensionRunner.emit({
 			type: "model_select",
 			model: nextModel,
@@ -3385,6 +3544,7 @@ export class AgentSession {
 				},
 				getThinkingLevel: () => this.thinkingLevel,
 				setThinkingLevel: (level) => this.setThinkingLevel(level),
+				getSessionController: () => this.getSessionController(),
 			},
 			{
 				getModel: () => this.model,
@@ -3610,6 +3770,7 @@ export class AgentSession {
 	}
 
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
+		this._invalidateSessionControllers();
 		const oldRunner = this._extensionRunner;
 		const previousFlagValues = oldRunner.getFlagValues();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
@@ -3941,7 +4102,6 @@ export class AgentSession {
 		if (!targetEntry) {
 			throw new Error(`Entry ${targetId} not found`);
 		}
-
 		// Collect entries to summarize (from old leaf to common ancestor)
 		const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(
 			this.sessionManager,
@@ -4055,6 +4215,7 @@ export class AgentSession {
 
 			// Switch leaf (with or without summary)
 			// Summary is attached at the navigation target position (newLeafId), not the old branch
+			this._invalidateSessionControllers();
 			let summaryEntry: BranchSummaryEntry | undefined;
 			if (summaryText) {
 				// Create summary at target position (can be null for root)

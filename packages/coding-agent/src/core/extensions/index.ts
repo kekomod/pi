@@ -2,6 +2,14 @@
  * Extension system for lifecycle events and custom tools.
  */
 
+export type {
+	SessionController,
+	SessionControllerModel,
+	SessionControllerPromptAcceptance,
+	SessionControllerPromptOptions,
+	SessionControllerSnapshot,
+	SessionControllerSnapshotOptions,
+} from "../session-controller.ts";
 export type { SlashCommandInfo, SlashCommandSource } from "../slash-commands.ts";
 export type { SourceInfo } from "../source-info.ts";
 export {
@@ -33,6 +41,7 @@ export type {
 	AppendEntryHandler,
 	// App keybindings (for custom editors)
 	AppKeybinding,
+	AssistantMessagePresentationTarget,
 	AutocompleteProviderFactory,
 	// Events - Tool (ToolCallEvent types)
 	BashToolCallEvent,
@@ -99,6 +108,7 @@ export type {
 	GetActiveToolsHandler,
 	GetAllToolsHandler,
 	GetCommandsHandler,
+	GetSessionControllerHandler,
 	GetThinkingLevelHandler,
 	GrepToolCallEvent,
 	GrepToolResultEvent,
@@ -117,8 +127,26 @@ export type {
 	// Events - Message
 	MessageEndEvent,
 	MessageEndEventResult,
+	MessageEntryAssociation,
+	MessageLeadingComponentContext,
+	MessageLeadingComponentFactory,
+	MessageNativeWidthContext,
+	MessageNativeWidthOptions,
+	MessageNativeWidthResolver,
+	MessageOutputPadding,
+	MessageOutputPaddingContext,
+	MessagePresentationContext,
+	MessagePresentationFactory,
+	MessagePresentationRole,
+	MessagePresentationTarget,
+	MessagePresentationTargetBase,
+	MessageRegionContext,
+	MessageRegionKind,
+	MessageRegionPresentation,
+	MessageRegionRenderer,
 	MessageRenderer,
 	MessageRenderOptions,
+	MessageRenderProjection,
 	MessageStartEvent,
 	MessageUpdateEvent,
 	ModelSelectEvent,
@@ -135,6 +163,10 @@ export type {
 	ProviderConfig,
 	ProviderModelConfig,
 	ProviderStreamEvent,
+	QueuedMessageComponentOptions,
+	QueuedMessageKind,
+	QueuedMessagePresentationContext,
+	QueuedMessagePresentationFactory,
 	ReadToolCallEvent,
 	ReadToolResultEvent,
 	// Commands
@@ -183,6 +215,12 @@ export type {
 	ToolExecutionStartEvent,
 	ToolExecutionUpdateEvent,
 	ToolExposure,
+	ToolGroupMemberRenderContext,
+	ToolGroupPresentation,
+	ToolGroupRenderContext,
+	ToolImageBounds,
+	ToolImagePresentation,
+	ToolImageRenderContext,
 	ToolInfo,
 	ToolLoadout,
 	ToolLoadoutChanges,
@@ -200,6 +238,7 @@ export type {
 	// Events - User Bash
 	UserBashEvent,
 	UserBashEventResult,
+	UserMessagePresentationTarget,
 	WidgetPlacement,
 	WorkingIndicatorOptions,
 	WriteToolCallEvent,

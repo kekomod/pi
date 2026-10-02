@@ -159,6 +159,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 	};
 	const state: { staleMessage?: string } = {};
 	const eventBusUnsubscribers = new Set<() => void>();
+	const sessionUnsubscribers = new Set<() => void>();
 	const assertActive = () => {
 		if (state.staleMessage) {
 			throw new Error(state.staleMessage);
@@ -196,6 +197,8 @@ export function createExtensionRuntime(): ExtensionRuntime {
 				"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().";
 			for (const unsubscribe of eventBusUnsubscribers) unsubscribe();
 			eventBusUnsubscribers.clear();
+			for (const unsubscribe of sessionUnsubscribers) unsubscribe();
+			sessionUnsubscribers.clear();
 		},
 		trackEventBusSubscription: (unsubscribe) => {
 			let active = true;
@@ -206,6 +209,17 @@ export function createExtensionRuntime(): ExtensionRuntime {
 				unsubscribe();
 			};
 			eventBusUnsubscribers.add(trackedUnsubscribe);
+			return trackedUnsubscribe;
+		},
+		trackSessionSubscription: (unsubscribe) => {
+			let active = true;
+			const trackedUnsubscribe = () => {
+				if (!active) return;
+				active = false;
+				sessionUnsubscribers.delete(trackedUnsubscribe);
+				unsubscribe();
+			};
+			sessionUnsubscribers.add(trackedUnsubscribe);
 			return trackedUnsubscribe;
 		},
 		// Pre-bind: queue registrations so bindCore() can flush them once the
@@ -379,6 +393,42 @@ function createExtensionAPI(
 		sendUserMessage(content, options): void {
 			assertActive();
 			runtime.sendUserMessage(content, options);
+		},
+
+		getSessionController() {
+			assertActive();
+			const controller = runtime.getSessionController?.();
+			if (!controller) throw new Error("Live session control is not available in this mode.");
+			return {
+				getSnapshot(options) {
+					assertActive();
+					return controller.getSnapshot(options);
+				},
+				subscribe(listener) {
+					assertActive();
+					const unsubscribe = controller.subscribe((event) => {
+						try {
+							runtime.assertActive();
+							listener(event);
+						} catch {
+							// Stale runtimes and extension listeners cannot interrupt the session event stream.
+						}
+					});
+					return runtime.trackSessionSubscription?.(unsubscribe) ?? unsubscribe;
+				},
+				prompt(content, options) {
+					assertActive();
+					return controller.prompt(content, options);
+				},
+				abort() {
+					assertActive();
+					return controller.abort();
+				},
+				clearQueue() {
+					assertActive();
+					return controller.clearQueue();
+				},
+			};
 		},
 
 		appendEntry(customType: string, data?: unknown): void {

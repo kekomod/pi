@@ -2,6 +2,7 @@ import type { Usage } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
 import type { SessionEntry } from "../src/core/session-manager.ts";
+import { ToolGroupCoordinator } from "../src/modes/interactive/components/tool-groups.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -17,7 +18,11 @@ describe("InteractiveMode compaction events", () => {
 			cost: { input: 0.01, output: 0.02, cacheRead: 0.03, cacheWrite: 0.065, total: 0.125 },
 		};
 		const addCompactionCostNotice = Reflect.get(InteractiveMode.prototype, "addCompactionCostNotice") as (
-			this: { chatContainer: Container; settingsManager: { getShowCacheMissNotices(): boolean } },
+			this: {
+				chatContainer: Container;
+				settingsManager: { getShowCacheMissNotices(): boolean };
+				toolGroupCoordinator: ToolGroupCoordinator;
+			},
 			notice: {
 				type: "compaction_cost";
 				kind: "compaction" | "branch_summary";
@@ -29,6 +34,7 @@ describe("InteractiveMode compaction events", () => {
 		const enabled = {
 			chatContainer: new Container(),
 			settingsManager: { getShowCacheMissNotices: () => true },
+			toolGroupCoordinator: new ToolGroupCoordinator(),
 		};
 		addCompactionCostNotice.call(enabled, { type: "compaction_cost", kind: "compaction", usage });
 		addCompactionCostNotice.call(enabled, {
@@ -43,6 +49,7 @@ describe("InteractiveMode compaction events", () => {
 		const disabled = {
 			chatContainer: new Container(),
 			settingsManager: { getShowCacheMissNotices: () => false },
+			toolGroupCoordinator: new ToolGroupCoordinator(),
 		};
 		addCompactionCostNotice.call(disabled, { type: "compaction_cost", kind: "compaction", usage });
 		expect(disabled.chatContainer.children).toHaveLength(0);

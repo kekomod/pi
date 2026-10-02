@@ -2,9 +2,17 @@ import assert from "node:assert";
 import { afterEach, describe, it } from "node:test";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Chalk } from "chalk";
-import { Markdown, type MarkdownTheme } from "../src/components/markdown.ts";
-import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.ts";
-import type { Component, TUI } from "../src/tui.ts";
+import { Markdown, type MarkdownCodeBlockRenderContext, type MarkdownTheme } from "../src/components/markdown.ts";
+import { ScrollView } from "../src/components/scroll-view.ts";
+import { VStack } from "../src/components/v-stack.ts";
+import { renderLayoutFrame } from "../src/layout.ts";
+import {
+	encodeKitty,
+	registerKittyImageMetadata,
+	resetCapabilitiesCache,
+	setCapabilities,
+} from "../src/terminal-image.ts";
+import type { Component, TUI, TuiMouseEvent } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { defaultMarkdownTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
@@ -62,6 +70,180 @@ describe("Markdown component", () => {
 			markdown.render(60);
 			assert.deepStrictEqual(calls.at(-1), { source: "updated", availableWidth: 56 });
 			assert.strictEqual(calls.length, 4);
+		});
+	});
+
+	describe("Presentation hooks", () => {
+		it("wraps native token rendering without bypassing parsing or highlighting", () => {
+			const seen: string[] = [];
+			const markdown = new Markdown(
+				"### heading\n\n```ts\nconst value = 1;\n```",
+				0,
+				0,
+				defaultMarkdownTheme,
+				undefined,
+				{
+					renderToken: ({ token, renderNative }) => {
+						seen.push(token.type);
+						if (token.type === "heading") return ["projected heading"];
+						return renderNative();
+					},
+				},
+			);
+
+			const lines = markdown.render(60).map(stripAnsi);
+			assert.ok(seen.includes("heading"));
+			assert.ok(seen.includes("code"));
+			assert.ok(lines.some((line) => line.includes("projected heading")));
+			assert.ok(lines.some((line) => line.includes("const value = 1;")));
+		});
+
+		it("allows native token rendering with a transformed heading", () => {
+			const source = "### Heading with enough words to wrap across rows";
+			const expected = new Markdown("## Heading with enough words to wrap across rows", 0, 0, defaultMarkdownTheme)
+				.render(24)
+				.map(stripAnsi);
+			let sawHeading = false;
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme, undefined, {
+				renderToken: ({ token, renderNative }) => {
+					if (token.type !== "heading") return renderNative();
+					sawHeading = true;
+					return renderNative({ ...token, depth: 2 });
+				},
+			});
+			assert.deepStrictEqual(markdown.render(24).map(stripAnsi), expected);
+			assert.ok(sawHeading);
+		});
+
+		it("allows table rows to be projected while retaining native cell rendering", () => {
+			let tableCalls = 0;
+			const markdown = new Markdown(
+				"| name | value |\n| --- | --- |\n| one | **two** |",
+				0,
+				0,
+				defaultMarkdownTheme,
+				undefined,
+				{
+					renderTable: ({ renderNative, renderInlineTokens, token }) => {
+						tableCalls++;
+						assert.strictEqual(renderInlineTokens(token.header[0]?.tokens ?? []), "name");
+						return renderNative().map((line) => `│ ${line}`);
+					},
+				},
+			);
+
+			const lines = markdown.render(60).map(stripAnsi);
+			assert.strictEqual(tableCalls, 1);
+			assert.ok(lines.some((line) => line.includes("name") && line.startsWith("│ ")));
+			assert.ok(lines.some((line) => line.includes("two")));
+		});
+	});
+
+	describe("Code block components", () => {
+		it("refreshes cached components, exposes native source rendering, and dispatches nested mouse input", () => {
+			let latestContext: MarkdownCodeBlockRenderContext | undefined;
+			let overlay = false;
+			let refreshes = 0;
+			let invalidations = 0;
+			let receivedMouse: TuiMouseEvent | undefined;
+			let renderCount = 0;
+			let nativeFrame = "";
+			const component: Component = {
+				invalidate() {
+					invalidations++;
+				},
+				render() {
+					renderCount++;
+					return [overlay ? "overlay content" : "diagram content"];
+				},
+				handleMouse(event) {
+					receivedMouse = event;
+					return { handled: true };
+				},
+			};
+			const markdown = new Markdown("> - ```mermaid\n>   A --> B\n>   ```", 1, 0, defaultMarkdownTheme, undefined, {
+				renderToken: ({ token, renderNative }) => {
+					if (token.type === "code")
+						nativeFrame = stripAnsi(renderNative({ ...token, lang: "mermaid · source" }).join("\n"));
+					return renderNative();
+				},
+				renderCodeBlock: (context) => {
+					latestContext = context;
+					nativeFrame = stripAnsi(context.renderNative({ ...context.token, lang: "mermaid · source" }).join("\n"));
+					return component;
+				},
+				refresh: () => refreshes++,
+				hasOverlay: () => overlay,
+			});
+
+			const lines = markdown.render(50);
+			assert.strictEqual(latestContext?.index, 0);
+			assert.strictEqual(latestContext?.width, 44);
+			assert.ok(nativeFrame.includes("mermaid · source"));
+			assert.ok(lines.some((line) => line.includes("diagram content")));
+
+			const firstRenderCount = renderCount;
+			markdown.render(50);
+			assert.strictEqual(renderCount, firstRenderCount + 1);
+			overlay = true;
+			assert.ok(markdown.render(50).some((line) => line.includes("overlay content")));
+			assert.ok(latestContext?.hasOverlay());
+
+			const diagramRow = markdown.render(50).findIndex((line) => line.includes("overlay content"));
+			const result = markdown.handleMouse?.({
+				type: "click",
+				button: "left",
+				x: 10,
+				y: diagramRow,
+				screenX: 10,
+				screenY: diagramRow,
+				width: 50,
+				height: lines.length,
+				shift: false,
+				alt: false,
+				ctrl: false,
+			});
+			assert.ok(result?.handled);
+			assert.strictEqual(receivedMouse?.x, 5);
+			assert.strictEqual(receivedMouse?.y, 0);
+
+			latestContext?.refresh();
+			assert.strictEqual(refreshes, 1);
+			assert.ok(invalidations > 0);
+		});
+
+		it("keeps Kitty continuation rows empty under nested list and quote prefixes", () => {
+			setCapabilities({ images: "kitty", trueColor: false, hyperlinks: false });
+			const imageId = 74201;
+			registerKittyImageMetadata({ imageId, columns: 4, rows: 3, widthPx: 32, heightPx: 48 });
+			const sequence = encodeKitty("aGVsbG8=", { imageId, columns: 4, rows: 3, moveCursor: false });
+			const image: Component = {
+				invalidate() {},
+				render: () => [sequence, "", ""],
+			};
+			const markdown = new Markdown(
+				"before\n\n> - ```mermaid\n>   A --> B\n>   ```\n\nafter\n\nlast",
+				2,
+				0,
+				defaultMarkdownTheme,
+				undefined,
+				{
+					renderCodeBlock: () => image,
+				},
+			);
+
+			const lines = markdown.render(50);
+			const imageRow = lines.findIndex((line) => line.includes(sequence));
+			assert.ok(imageRow >= 0);
+			assert.strictEqual(lines[imageRow + 1], "");
+			assert.strictEqual(lines[imageRow + 2], "");
+
+			const scrollView = new ScrollView(markdown);
+			const root = new VStack([{ component: scrollView, basis: 0, grow: 1 }]);
+			renderLayoutFrame(root, 50, 3, () => {});
+			scrollView.scrollTo(imageRow + 1);
+			const cropped = renderLayoutFrame(root, 50, 3, () => {});
+			assert.ok(cropped.lines[0]?.includes("y=16,h=32,r=2"));
 		});
 	});
 

@@ -44,7 +44,17 @@ export { HStack } from "./components/h-stack.ts";
 export { Image, type ImageOptions, type ImageTheme } from "./components/image.ts";
 export { Input } from "./components/input.ts";
 export { Loader, type LoaderIndicatorOptions } from "./components/loader.ts";
-export { type DefaultTextStyle, Markdown, type MarkdownOptions, type MarkdownTheme } from "./components/markdown.ts";
+export {
+	type DefaultTextStyle,
+	Markdown,
+	type MarkdownCodeBlockRenderContext,
+	type MarkdownOptions,
+	type MarkdownTableRenderContext,
+	type MarkdownTableRenderer,
+	type MarkdownTheme,
+	type MarkdownTokenRenderContext,
+	type MarkdownTokenRenderer,
+} from "./components/markdown.ts";
 export { MouseRegion, type MouseRegionHandler } from "./components/mouse-region.ts";
 export {
 	ScrollView,
@@ -169,7 +179,10 @@ export {
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 	type TuiMouseEventType,
+	type TuiRendererChangeListener,
 	type TuiStopOptions,
+	type TuiViewportInputListener,
+	type TuiViewportRenderHook,
 	type ViewportTUI,
 } from "./tui.ts";
 export { TuiAltScreen, type TuiAltScreenOptions } from "./tui-alt-screen.ts";

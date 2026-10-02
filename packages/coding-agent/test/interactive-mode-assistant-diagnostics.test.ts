@@ -1,6 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
+import { ToolGroupCoordinator } from "../src/modes/interactive/components/tool-groups.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -52,6 +53,7 @@ type NoticeContext = {
 	chatContainer: Container;
 	settingsManager: { getShowCacheMissNotices(): boolean };
 	sessionManager: { getBranch(): Array<{ type: "message"; message: AssistantMessage }> };
+	toolGroupCoordinator: ToolGroupCoordinator;
 };
 
 const maybeShowThinkingDropNotice = Reflect.get(InteractiveMode.prototype, "maybeShowThinkingDropNotice") as (
@@ -65,15 +67,18 @@ describe("InteractiveMode assistant diagnostics", () => {
 		const enabled = {
 			chatContainer: new Container(),
 			settingsManager: { getShowCacheMissNotices: () => true },
+			toolGroupCoordinator: new ToolGroupCoordinator(),
 			sessionManager: { getBranch: () => [] },
 		};
 		maybeShowThinkingDropNotice.call(enabled, message);
 		const output = stripAnsi(enabled.chatContainer.render(120).join("\n"));
-		expect(output).toContain("Anthropic dropped 3 thinking blocks (details in session)");
+		expect(output).toContain("Anthropic dropped 3 thinking blocks");
+		expect(output).toContain("prefix_binding_mismatch at messages.2.content.0");
 
 		const disabled = {
 			chatContainer: new Container(),
 			settingsManager: { getShowCacheMissNotices: () => false },
+			toolGroupCoordinator: new ToolGroupCoordinator(),
 			sessionManager: { getBranch: () => [] },
 		};
 		maybeShowThinkingDropNotice.call(disabled, message);
@@ -86,6 +91,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 			chatContainer: new Container(),
 			settingsManager: { getShowCacheMissNotices: () => true },
 			sessionManager: { getBranch: () => [{ type: "message" as const, message }] },
+			toolGroupCoordinator: new ToolGroupCoordinator(),
 		};
 
 		maybeShowThinkingDropNotice.call(context, { ...message, timestamp: 2 });

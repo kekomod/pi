@@ -1,32 +1,100 @@
-import { Container, Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
-import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
+import {
+	Box,
+	Container,
+	Markdown,
+	type MarkdownOptions,
+	type MarkdownTheme,
+	Spacer,
+	Text,
+	type TuiMouseEvent,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
+import type {
+	MarkdownTransformer,
+	MessageLeadingComponentContext,
+	MessageLeadingComponentFactory,
+	MessageNativeWidthOptions,
+	MessageNativeWidthResolver,
+	MessageOutputPadding,
+	MessagePresentationContext,
+	MessageRegionRenderer,
+	MessageRenderProjection,
+	UserMessagePresentationTarget,
+} from "../../../core/extensions/types.ts";
+
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
+import { mergeMarkdownOptions, resolveMessageRegionPresentation } from "./message-presentation.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 
+function escapeLiteralControls(text: string): string {
+	return text.replace(
+		/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g,
+		(character) => `\\x${character.charCodeAt(0).toString(16).padStart(2, "0")}`,
+	);
+}
+
+export interface UserMessageComponentOptions {
+	readonly literal?: boolean;
+	readonly literalTextStyle?: (content: string) => string;
+}
+
 /**
  * Component that renders a user message
  */
-export class UserMessageComponent extends Container {
+export class UserMessageComponent extends Container implements UserMessagePresentationTarget {
+	readonly role = "user" as const;
+	readonly isStreaming = false;
 	private text: string;
 	private markdownTheme: MarkdownTheme;
 	private outputPad: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
+	private markdownRuntime: Pick<MarkdownOptions, "refresh" | "hasOverlay"> = {};
+	private projections = new Set<MessageRenderProjection>();
+	private regionRenderers = new Set<MessageRegionRenderer>();
+	private leadingComponentFactories = new Set<MessageLeadingComponentFactory>();
+	private outputPadding?: MessageOutputPadding;
+	private nativeWidthResolver?: MessageNativeWidthResolver;
+	private cacheNativeProbe = false;
+	private nativeLayout?: {
+		readonly outerWidth: number;
+		readonly overlayVisible: boolean;
+		readonly nativeWidth: number;
+		readonly probeLines: string[];
+		readonly renderedLines?: string[];
+		readonly paddedLines?: string[];
+		readonly paddingSignature?: string;
+	};
+	private displayTextResolver?: (context: MessagePresentationContext) => string | undefined;
+	private builtDisplayText: string;
+	private builtDisplayWidth: number | undefined;
+	private readonly literal: boolean;
+	private readonly literalTextStyle?: (content: string) => string;
+
+	get message(): unknown {
+		return this.text;
+	}
 
 	constructor(
 		text: string,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
+		options: UserMessageComponentOptions = {},
 	) {
 		super();
 		this.text = text;
 		this.markdownTheme = markdownTheme;
 		this.outputPad = outputPad;
 		this.markdownTransformers = markdownTransformers;
+		this.literal = options.literal === true;
+		this.literalTextStyle = options.literalTextStyle;
+		this.builtDisplayText = text;
+		this.builtDisplayWidth = undefined;
 		this.rebuild();
 	}
 
@@ -35,30 +103,159 @@ export class UserMessageComponent extends Container {
 		this.rebuild();
 	}
 
-	private rebuild(): void {
-		this.clear();
-		// The Markdown pads and colors its own background: a Box around it would keep a second full-width copy of every
-		// line, with identical output.
-		this.addChild(
-			new Markdown(
-				this.text,
-				this.outputPad,
-				1,
-				this.markdownTheme,
-				{
-					color: (content: string) => theme.fg("userMessageText", content),
-					bgColor: (content: string) => theme.bg("userMessageBg", content),
-				},
-				{
-					preserveOrderedListMarkers: true,
-					preserveBackslashEscapes: true,
-					transform: createMarkdownTransform("user", false, this.markdownTransformers),
-				},
-			),
+	/** Bind asynchronous block updates to this message and its current terminal renderer. */
+	setMarkdownRuntime(refresh: () => void, hasOverlay: () => boolean): void {
+		this.markdownRuntime = {
+			refresh: () => {
+				this.invalidate();
+				refresh();
+			},
+			hasOverlay,
+		};
+		this.rebuild();
+	}
+
+	override invalidate(): void {
+		this.nativeLayout = undefined;
+		super.invalidate();
+	}
+
+	addRegionPresentation(renderer: MessageRegionRenderer): () => void {
+		this.regionRenderers.add(renderer);
+		this.rebuild();
+		return () => {
+			if (this.regionRenderers.delete(renderer)) this.rebuild();
+		};
+	}
+
+	setOutputPadding(padding: MessageOutputPadding | undefined): void {
+		this.outputPadding = padding;
+		this.invalidate();
+	}
+
+	setNativeRenderWidth(
+		resolver: MessageNativeWidthResolver | undefined,
+		options: MessageNativeWidthOptions = {},
+	): void {
+		this.nativeWidthResolver = resolver;
+		this.cacheNativeProbe = options.cacheProbe === true;
+		this.invalidate();
+	}
+
+	setDisplayText(resolver: ((context: MessagePresentationContext) => string | undefined) | undefined): void {
+		this.displayTextResolver = resolver;
+		this.rebuild();
+	}
+
+	addLeadingComponent(factory: MessageLeadingComponentFactory): () => void {
+		this.leadingComponentFactories.add(factory);
+		this.invalidate();
+		return () => {
+			if (this.leadingComponentFactories.delete(factory)) this.invalidate();
+		};
+	}
+
+	private resolveDisplayText(width: number): string {
+		return (
+			this.displayTextResolver?.({
+				role: this.role,
+				message: this.message,
+				isStreaming: this.isStreaming,
+				width,
+			}) ?? this.text
 		);
 	}
 
-	override render(width: number): string[] {
+	private rebuild(width?: number, resolvedText?: string): void {
+		this.nativeLayout = undefined;
+		this.clear();
+		for (const factory of this.leadingComponentFactories) {
+			try {
+				const component = factory({
+					role: this.role,
+					message: this.message,
+					isStreaming: this.isStreaming,
+				} satisfies MessageLeadingComponentContext);
+				if (component) this.addChild(component);
+			} catch {
+				// Keep native message content when an optional leading component fails.
+			}
+		}
+		const displayText = resolvedText ?? (width === undefined ? this.text : this.resolveDisplayText(width));
+		this.builtDisplayText = displayText;
+		this.builtDisplayWidth = width;
+		const presentation = resolveMessageRegionPresentation(this.regionRenderers, {
+			role: this.role,
+			region: "text",
+			index: 0,
+			text: displayText,
+			message: this.message,
+			isStreaming: this.isStreaming,
+		});
+		const contentBox = new Box(this.outputPad, 1, (content: string) => theme.bg("userMessageBg", content));
+		for (let spacing = 0; spacing < presentation.leadingSpacing; spacing++) {
+			contentBox.addChild(new Spacer(1));
+		}
+		if (this.literal) {
+			contentBox.addChild(
+				new Text(
+					escapeLiteralControls(presentation.text),
+					0,
+					0,
+					this.literalTextStyle ?? ((content) => theme.fg("userMessageText", content)),
+				),
+			);
+		} else {
+			contentBox.addChild(
+				new Markdown(
+					presentation.text,
+					0,
+					0,
+					{ ...this.markdownTheme, ...presentation.markdownTheme },
+					{
+						color: (content: string) => theme.fg("userMessageText", content),
+						...presentation.defaultTextStyle,
+					},
+					mergeMarkdownOptions(
+						{
+							...this.markdownRuntime,
+							preserveOrderedListMarkers: true,
+							preserveBackslashEscapes: true,
+							transform: createMarkdownTransform("user", false, this.markdownTransformers),
+						},
+						presentation.markdownOptions,
+					),
+				),
+			);
+		}
+		this.addChild(contentBox);
+	}
+
+	private applyOutputPadding(width: number): void {
+		const padding =
+			typeof this.outputPadding === "function"
+				? this.outputPadding({
+						role: this.role,
+						message: this.message,
+						isStreaming: this.isStreaming,
+						width,
+						defaultPadding: this.outputPad,
+					})
+				: this.outputPadding;
+		if (padding !== undefined && Number.isFinite(padding) && padding !== this.outputPad) {
+			this.setOutputPad(Math.max(0, Math.floor(padding)));
+		}
+	}
+
+	addRenderProjection(projection: MessageRenderProjection): () => void {
+		this.projections.add(projection);
+		this.invalidate();
+		return () => {
+			if (this.projections.delete(projection)) this.invalidate();
+		};
+	}
+
+	private renderNative(width: number): string[] {
 		const lines = super.render(width);
 		if (lines.length === 0) {
 			return lines;
@@ -67,5 +264,111 @@ export class UserMessageComponent extends Container {
 		lines[0] = OSC133_ZONE_START + lines[0];
 		lines[lines.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[lines.length - 1];
 		return lines;
+	}
+
+	private resolveNativeRender(width: number): { readonly lines: string[]; readonly nativeWidth: number } {
+		const resolver = this.nativeWidthResolver;
+		if (!resolver) {
+			return { lines: this.renderNative(width), nativeWidth: width };
+		}
+		const overlayVisible = this.markdownRuntime.hasOverlay?.() ?? false;
+		const cached =
+			this.cacheNativeProbe && this.nativeLayout?.overlayVisible === overlayVisible ? this.nativeLayout : undefined;
+		const sameWidth = cached?.outerWidth === width;
+		const initial = sameWidth ? cached.probeLines : this.renderNative(width);
+		let nativeWidth = width;
+		try {
+			const candidate = resolver({
+				role: this.role,
+				message: this.message,
+				isStreaming: this.isStreaming,
+				width,
+				nativeLines: initial,
+			});
+			if (candidate !== undefined && Number.isFinite(candidate))
+				nativeWidth = Math.max(1, Math.min(width, Math.floor(candidate)));
+		} catch {
+			// Keep the full-width native message when an optional resolver fails.
+		}
+		this.nativeLayout = { outerWidth: width, overlayVisible, nativeWidth, probeLines: initial };
+		if (sameWidth && cached && cached.nativeWidth === nativeWidth) {
+			if (nativeWidth === width) return { lines: initial, nativeWidth };
+			const lines = cached.renderedLines ?? this.renderNative(nativeWidth);
+			this.nativeLayout = { ...cached, probeLines: initial, renderedLines: lines };
+			return { lines, nativeWidth };
+		}
+		if (nativeWidth === width && !sameWidth) return { lines: initial, nativeWidth };
+		const lines = this.renderNative(nativeWidth);
+		if (this.cacheNativeProbe)
+			this.nativeLayout = {
+				outerWidth: width,
+				overlayVisible,
+				nativeWidth,
+				probeLines: initial,
+				renderedLines: lines,
+			};
+		return { lines, nativeWidth };
+	}
+
+	private padNativeLines(lines: readonly string[], width: number): string[] {
+		return lines.map((line) => {
+			const visible = visibleWidth(line);
+			return visible >= width
+				? truncateToWidth(line, width)
+				: line + theme.bg("userMessageBg", " ".repeat(width - visible));
+		});
+	}
+
+	private paddingSignature(): string {
+		return theme.bg("userMessageBg", "\u0000");
+	}
+
+	override render(width: number): string[] {
+		this.applyOutputPadding(width);
+		if (this.displayTextResolver) {
+			const displayText = this.resolveDisplayText(width);
+			if (this.builtDisplayWidth !== width || this.builtDisplayText !== displayText) {
+				this.rebuild(width, displayText);
+			}
+		}
+		const native = this.resolveNativeRender(width);
+		let lines: string[];
+		if (native.nativeWidth === width) lines = native.lines;
+		else {
+			const signature = this.paddingSignature();
+			const cached = this.cacheNativeProbe ? this.nativeLayout : undefined;
+			if (
+				cached?.outerWidth === width &&
+				cached.nativeWidth === native.nativeWidth &&
+				cached.paddingSignature === signature &&
+				cached.paddedLines
+			)
+				lines = cached.paddedLines;
+			else {
+				lines = this.padNativeLines(native.lines, width);
+				if (cached?.outerWidth === width && cached.nativeWidth === native.nativeWidth)
+					this.nativeLayout = { ...cached, paddedLines: lines, paddingSignature: signature };
+			}
+		}
+		for (const projection of this.projections) {
+			try {
+				lines =
+					projection({
+						role: this.role,
+						message: this.message,
+						isStreaming: this.isStreaming,
+						width,
+						nativeLines: lines,
+					}) ?? lines;
+			} catch {
+				// Keep the native transcript visible if an extension projection fails.
+			}
+		}
+		return lines;
+	}
+
+	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		const nativeWidth = this.nativeLayout?.outerWidth === event.width ? this.nativeLayout.nativeWidth : event.width;
+		return super.handleMouse({ ...event, width: nativeWidth });
 	}
 }

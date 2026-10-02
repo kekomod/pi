@@ -86,6 +86,8 @@ An OAuth provider supplies a display name, login flow, token refresh, and access
 
 OAuth callbacks are UI-neutral. They can open an authorization URL, show a device code, report progress, request input, or ask the user to choose a login method. Honor cancellation and the supplied abort signal during network requests.
 
+Use `externalLogin` in `ProviderConfig` when an extension owns authentication outside Pi. Set `authType` to `"oauth"` or `"api_key"` and provide `handler(context: ExtensionCommandContext): Promise<void>`. The handler owns the flow and completion UI; Pi does not write to its credential store during this flow. This override replaces the provider's regular auth entries in `/login`.
+
 Never write access tokens, refresh tokens, authorization headers, or complete provider responses to ordinary logs.
 
 ## Supply and refresh models

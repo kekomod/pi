@@ -81,6 +81,7 @@ describe("InteractiveMode.showStatus", () => {
 	test("coalesces immediately-sequential status messages", () => {
 		const fakeThis: any = {
 			chatContainer: new Container(),
+			toolGroupCoordinator: { break: vi.fn() },
 			ui: { requestRender: vi.fn() },
 			lastStatusSpacer: undefined,
 			lastStatusText: undefined,
@@ -100,6 +101,7 @@ describe("InteractiveMode.showStatus", () => {
 	test("appends a new status line if something else was added in between", () => {
 		const fakeThis: any = {
 			chatContainer: new Container(),
+			toolGroupCoordinator: { break: vi.fn() },
 			ui: { requestRender: vi.fn() },
 			lastStatusSpacer: undefined,
 			lastStatusText: undefined,
@@ -125,6 +127,7 @@ describe("InteractiveMode.showManagedToolStatus", () => {
 	test("renders tool updates as one contiguous group", () => {
 		const fakeThis: any = {
 			chatContainer: new Container(),
+			toolGroupCoordinator: { break: vi.fn() },
 			ui: { requestRender: vi.fn() },
 			managedToolStatusStarted: false,
 			lastStatusSpacer: undefined,

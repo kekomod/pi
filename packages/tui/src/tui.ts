@@ -4,6 +4,7 @@
 
 import { performance } from "node:perf_hooks";
 import { isKeyRelease, matchesKey } from "./keys.ts";
+import type { LayoutFrame } from "./layout.ts";
 import type { Terminal } from "./terminal.ts";
 import {
 	parseOscColorResponse,
@@ -143,16 +144,13 @@ export interface Component {
 
 export type TuiInputListenerResult = { consume?: boolean; data?: string } | undefined;
 export type TuiInputListener = (data: string) => TuiInputListenerResult;
+export type TuiViewportInputListener = (data: string) => void;
+export type TuiViewportRenderHook = (screen: string[], layout: LayoutFrame, width: number) => string[] | undefined;
 type PendingTerminalColorQuery = {
 	foreground?: RgbColor;
 	background?: RgbColor;
 	palette: Array<RgbColor | undefined>;
-	/** Targets that already replied, so duplicates do not count twice. */
 	replied: Set<string>;
-	/**
-	 * Receives the result: the promise's resolve until the timeout, then `onLateReply`. Unset once the
-	 * query completed (on the DA1 reply or once every color replied); later replies are ignored.
-	 */
 	deliver: ((colors: TerminalColors) => void) | undefined;
 	timer: NodeJS.Timeout | undefined;
 };
@@ -445,6 +443,9 @@ export function compositeTuiLine(
 
 export type TuiMode = "regular" | "fullscreen";
 
+/** Receives the concrete renderer behind a stable interactive TUI reference. */
+export type TuiRendererChangeListener = (renderer: TUI) => void;
+
 export interface TuiStopOptions {
 	/** Leave renderer output in place for another TUI taking over the same terminal. */
 	preserveScreen?: boolean;
@@ -471,8 +472,15 @@ export interface TUI extends Component {
 	stop(options?: TuiStopOptions): void;
 	renderNow(force?: boolean): void;
 	requestRender(force?: boolean): void;
+	requestImmediateRender(): void;
 	addInputListener(listener: TuiInputListener): () => void;
 	removeInputListener(listener: TuiInputListener): void;
+	/**
+	 * Optional stable-reference hook. The listener is called synchronously with
+	 * the current renderer on subscription and after each renderer replacement.
+	 * The listener owns subscriptions it creates on that renderer.
+	 */
+	onRendererChange?: (listener: TuiRendererChangeListener) => () => void;
 	onTerminalColorSchemeChange(listener: (scheme: TerminalColorScheme) => void): () => void;
 	setTerminalColorSchemeNotifications(enabled: boolean): void;
 	queryTerminalColors(options: {
@@ -486,6 +494,9 @@ export const VIEWPORT_TUI = Symbol.for("@earendil-works/pi-tui/viewport");
 export interface ViewportTUI extends TUI {
 	readonly [VIEWPORT_TUI]: true;
 	setLayoutRoot(component: Component | undefined): void;
+	setWheelScrollLines(lines: number): void;
+	addViewportInputListener(listener: TuiViewportInputListener): () => void;
+	addViewportRenderHook(listener: TuiViewportRenderHook): () => void;
 }
 
 export function isViewportTUI(tui: TUI): tui is ViewportTUI {
@@ -998,7 +1009,7 @@ export abstract class TuiBase extends Container implements TUI {
 		process.nextTick(() => this.scheduleRender());
 	}
 
-	private requestImmediateRender(): void {
+	requestImmediateRender(): void {
 		this.cancelRenderTimer();
 		this.renderRequested = true;
 		if (this.immediateRenderScheduled) return;

@@ -100,6 +100,8 @@ Use each event’s declared result type rather than assuming every return value 
 
 Events cover resource discovery, sessions, agent and message lifecycle, providers, tools, and raw input.
 
+The `input` event identifies its source as `interactive`, `rpc`, `extension`, or `remote`. Remote controller input follows the same input handlers and queue semantics as local input.
+
 `before_agent_start` exposes both the current prompt and its structured `systemPromptOptions`. Prefer changing prompt sections, selected tools, or guidelines so Pi can append a transcript delta. Returning `systemPrompt`, or setting `forceSystemPrompt`, replaces the whole prompt for that run while the transcript continues recording the structured sections. Providers receive the forced text as their leading system prompt.
 
 `message_end` can replace a finalized message while preserving its role. `tool_call` can mutate input or block execution. `tool_result` handlers compose, with each handler seeing prior changes.
@@ -211,6 +213,31 @@ Command handlers receive `ExtensionCommandContext`, which adds operations for wa
 These operations are command-only because calling them from lifecycle handlers can deadlock the runtime.
 
 Session replacement invalidates the old context. Capture only plain data before switching, then use the fresh context supplied to `withSession` for session-bound work.
+
+### Live session controller
+
+`pi.getSessionController()` exposes a narrow controller for the current live `AgentSession` when the mode supports it. Obtain it from an event or command handler after session actions are bound.
+
+```typescript
+const controller = pi.getSessionController?.();
+if (controller) {
+  const snapshot = controller.getSnapshot({ entryLimit: 200 });
+  const unsubscribe = controller.subscribe((event) => {
+    // Copied events from the same ordered stream consumed by the terminal UI.
+  });
+  const receipt = await controller.prompt("Continue", { deliverAs: "followUp" });
+  if (!receipt.accepted) console.error(receipt.reason);
+  unsubscribe();
+}
+```
+
+Snapshots contain copied active transcript entries, the streaming message, queues, session and model identity, thinking level, and run state. Model projections omit request configuration and credentials. `entryLimit` retains the most recent entries, defaults to 200, and is capped at 1000.
+
+Controllers become stale after reload, shutdown, tree navigation, or session identity changes; subscriptions are removed with them. `prompt()` accepts text or text and images, marks the source as `remote`, and resolves when session preflight accepts or rejects it. Later model and tool outcomes arrive on the subscribed event stream. It does not dispatch slash commands or expand prompt templates.
+
+### Provider-owned login
+
+Use `externalLogin` in the config form of `pi.registerProvider()` when authentication lives outside Pi. Its `authType` selects the account or API-key entry in `/login`; the handler receives `ExtensionCommandContext` and owns completion UI. Pi does not write credentials during this flow. See [Custom Providers](custom-provider.md#provide-authentication).
 
 <a id="state-management"></a>
 <a id="persist-state"></a>

@@ -1,6 +1,7 @@
 import { Container } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSessionRuntimeDiagnostic } from "../../../src/core/agent-session-services.ts";
+import { ToolGroupCoordinator } from "../../../src/modes/interactive/components/tool-groups.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
 import { createHarness } from "../harness.ts";
@@ -27,6 +28,7 @@ describe("issue #7829 invalid settings warning", () => {
 			const context = {
 				init: vi.fn(async () => {}),
 				options: { startupDiagnostics },
+				toolGroupCoordinator: new ToolGroupCoordinator(),
 				chatContainer,
 				outputPad: 1,
 				ui: { requestRender: vi.fn() },

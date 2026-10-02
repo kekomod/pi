@@ -27,6 +27,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { classifierErrorResult, imageErrorResult } from "@earendil-works/pi-ai/utils/model-operations";
+import type { ExternalLoginConfig } from "./extensions/types.ts";
 import type { ModelConfig, ModelsJsonModel, ModelsJsonModelOverride, ModelsJsonProvider } from "./model-config.ts";
 import {
 	clearConfigValueCache,
@@ -102,6 +103,7 @@ export interface ProviderConfigInput {
 	headers?: Record<string, string>;
 	authHeader?: boolean;
 	oauth?: ExtensionOAuthConfig;
+	externalLogin?: ExternalLoginConfig;
 	models?: ProviderModelConfig[];
 	refreshModels?(context: RefreshModelsContext): Promise<ProviderModelConfig[]>;
 }

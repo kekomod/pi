@@ -172,6 +172,15 @@ export function wordWrapLine(line: string, maxWidth: number, preSegmented?: Intl
 		if (gWidth > maxWidth) {
 			// Single atomic segment wider than maxWidth (e.g. paste marker
 			// in a narrow terminal). Re-wrap it at grapheme granularity.
+			// A single Unicode grapheme can itself be wider than one cell. It
+			// cannot be split without corrupting the grapheme, so keep it as one
+			// chunk rather than recursing forever on the same segment.
+			if (!isPasteMarker(grapheme) && grapheme.length > 0 && charIndex === chunkStart && currentWidth === 0) {
+				chunks.push({ text: grapheme, startIndex: charIndex, endIndex: charIndex + grapheme.length });
+				chunkStart = charIndex + grapheme.length;
+				wrapOppIndex = -1;
+				continue;
+			}
 
 			// The segment remains logically atomic for cursor
 			// movement / editing — the split is purely visual for word-wrap layout.
@@ -517,6 +526,16 @@ export class Editor implements Component, Focusable {
 		return this.borderColor(border);
 	}
 
+	/**
+	 * Render the active autocomplete list while keeping its interaction state native.
+	 * Subclasses may adjust the returned rows without replacing the SelectList, so
+	 * selection, callbacks, keyboard input, and mouse coordinates remain owned by
+	 * the editor.
+	 */
+	protected renderAutocompleteList(list: SelectList, width: number, _prefix: string): string[] {
+		return list.render(width);
+	}
+
 	render(width: number): string[] {
 		const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
 		const paddingX = Math.min(this.paddingX, maxPadding);
@@ -617,7 +636,11 @@ export class Editor implements Component, Focusable {
 		// Add autocomplete list if active
 		this.renderedAutocompleteHeight = 0;
 		if (this.autocompleteState && this.autocompleteList) {
-			const autocompleteResult = this.autocompleteList.render(contentWidth);
+			const autocompleteResult = this.renderAutocompleteList(
+				this.autocompleteList,
+				contentWidth,
+				this.autocompletePrefix,
+			);
 			this.renderedAutocompleteHeight = autocompleteResult.length;
 			for (const line of autocompleteResult) {
 				const lineWidth = visibleWidth(line);

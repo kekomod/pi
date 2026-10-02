@@ -45,6 +45,7 @@ describe("OAuthSelectorComponent", () => {
 			session: {
 				modelRuntime: {
 					getProviders: () => providers,
+					getRegisteredProviderConfig: () => undefined,
 					getProviderAuthStatus: () => ({ configured: false }),
 					isUsingOAuth: () => false,
 				},

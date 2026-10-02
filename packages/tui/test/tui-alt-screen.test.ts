@@ -1101,13 +1101,61 @@ describe("TuiAltScreen", () => {
 				.map((event) => event.data)
 				.join("");
 			const placementIndex = redrawWrites.indexOf("\x1b_Ga=p,q=2");
-			assert.ok(redrawWrites.includes("\x1b_Ga=d,d=a,q=2\x1b\\"));
+			assert.match(redrawWrites, /\x1b_Ga=d,d=i,i=\d+,q=2\x1b\\/);
 			assert.ok(placementIndex > redrawWrites.indexOf("changed"));
 			assert.ok(!redrawWrites.includes("\x1b_Ga=T"));
 			assert.ok(redrawWrites.length < 2000, `expected placement-only redraw, got ${redrawWrites.length} bytes`);
 			assert.ok(terminal.getViewport().some((line) => line.trimEnd() === "changed"));
 			tui.stop();
 		} finally {
+			resetCapabilitiesCache();
+		}
+	});
+
+	it("clears WezTerm rows before redrawing Kitty image placements", async () => {
+		const previousTermProgram = process.env.TERM_PROGRAM;
+		const previousWezTermPane = process.env.WEZTERM_PANE;
+		try {
+			process.env.TERM_PROGRAM = "wezterm";
+			delete process.env.WEZTERM_PANE;
+			setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+			const terminal = new RecordingTerminal(20, 4);
+			const tui = new TuiAltScreen(terminal);
+			try {
+				const imageId = 9876;
+				const imageLine = encodeKitty("AAAA", { columns: 2, rows: 2, imageId, moveCursor: false });
+				registerKittyImageMetadata({ imageId, columns: 2, rows: 2, widthPx: 100, heightPx: 100 });
+				let moved = false;
+				tui.addChild({
+					render: () => (moved ? ["header", imageLine, "footer"] : [imageLine, "footer"]),
+					invalidate: () => {},
+				});
+				tui.start();
+				await terminal.waitForRender();
+
+				const eventCount = terminal.events.length;
+				moved = true;
+				tui.requestRender();
+				await terminal.waitForRender();
+				const redrawWrites = terminal.events
+					.slice(eventCount)
+					.filter((event): event is { type: "write"; data: string } => event.type === "write")
+					.map((event) => event.data)
+					.join("");
+				const lastRowClear = redrawWrites.lastIndexOf("\x1b[2K");
+				const placement = redrawWrites.indexOf("\x1b_Ga=p,q=2");
+
+				assert.ok(lastRowClear >= 0);
+				assert.ok(placement > lastRowClear, "all row clears must precede Kitty image placement");
+				assert.strictEqual(redrawWrites.indexOf("\x1b[2K", placement), -1);
+			} finally {
+				tui.stop();
+			}
+		} finally {
+			if (previousTermProgram === undefined) delete process.env.TERM_PROGRAM;
+			else process.env.TERM_PROGRAM = previousTermProgram;
+			if (previousWezTermPane === undefined) delete process.env.WEZTERM_PANE;
+			else process.env.WEZTERM_PANE = previousWezTermPane;
 			resetCapabilitiesCache();
 		}
 	});

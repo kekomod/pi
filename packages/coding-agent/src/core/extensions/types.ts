@@ -47,9 +47,12 @@ import type {
 	AutocompleteItem,
 	AutocompleteProvider,
 	Component,
+	DefaultTextStyle,
 	EditorComponent,
 	EditorTheme,
 	KeyId,
+	MarkdownOptions,
+	MarkdownTheme,
 	OverlayHandle,
 	OverlayOptions,
 	TUI,
@@ -67,6 +70,7 @@ import type { McpServerConfig, McpServerRegistry, RegisteredMcpServer } from "..
 import type { CustomMessage } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
+import type { SessionController } from "../session-controller.ts";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
@@ -136,6 +140,226 @@ export interface WorkingIndicatorOptions {
 	frames?: string[];
 	/** Frame interval in milliseconds for animated indicators. */
 	intervalMs?: number;
+}
+
+/** The two transcript message kinds that expose presentation projections. */
+export type MessagePresentationRole = "user" | "assistant";
+
+/** A native Markdown region inside a transcript message. */
+export type MessageRegionKind = "text" | "thinking" | "error";
+
+export interface MessageRegionContext {
+	readonly role: MessagePresentationRole;
+	readonly region: MessageRegionKind;
+	readonly index: number;
+	readonly text: string;
+	readonly message: unknown;
+	readonly isStreaming: boolean;
+}
+
+/** Presentation adjustments applied while Pi builds a native message region. */
+export interface MessageRegionPresentation {
+	/** Replace only the displayed region text; the stored message remains unchanged. */
+	readonly text?: string;
+	/** Add native spacer rows immediately before this region. */
+	readonly leadingSpacing?: number;
+	/** Merge these style functions/options into the native Markdown instance. */
+	readonly markdownTheme?: Partial<MarkdownTheme>;
+	readonly defaultTextStyle?: Partial<DefaultTextStyle>;
+	/** Retain Pi's parser, wrapping, highlighting, and native renderer. */
+	readonly markdownOptions?: MarkdownOptions;
+}
+
+export type MessageRegionRenderer = (context: MessageRegionContext) => MessageRegionPresentation | undefined;
+
+export interface MessageOutputPaddingContext {
+	readonly role: MessagePresentationRole;
+	readonly message: unknown;
+	readonly isStreaming: boolean;
+	readonly width: number;
+	readonly defaultPadding: number;
+}
+
+export type MessageOutputPadding = number | ((context: MessageOutputPaddingContext) => number | undefined);
+
+/** Context used to reserve width while retaining native message layout and hit testing. */
+export interface MessageNativeWidthContext {
+	readonly role: MessagePresentationRole;
+	readonly message: unknown;
+	readonly isStreaming: boolean;
+	readonly width: number;
+	readonly nativeLines: readonly string[];
+}
+
+/** Return the width for a second native render, or undefined to keep the full width. */
+export type MessageNativeWidthResolver = (context: MessageNativeWidthContext) => number | undefined;
+
+/**
+ * Controls native probe and derived-row caching for a width resolver.
+ *
+ * Caching is opt in because native leading components can update without notifying
+ * their parent message. Callers that enable it must invalidate the message whenever
+ * any native child, theme, streaming state, or expansion state changes.
+ */
+export interface MessageNativeWidthOptions {
+	readonly cacheProbe?: boolean;
+}
+
+export interface MessageLeadingComponentContext {
+	readonly role: MessagePresentationRole;
+	readonly message: unknown;
+	readonly isStreaming: boolean;
+}
+
+export type MessageLeadingComponentFactory = (context: MessageLeadingComponentContext) => Component | undefined;
+
+/** Common native layout hooks shared by user and assistant transcript messages. */
+export interface MessagePresentationTargetBase {
+	readonly role: MessagePresentationRole;
+	readonly message: unknown;
+	readonly isStreaming: boolean;
+	/** Add a row projection for cosmetic output that does not change native hit-test geometry. */
+	addRenderProjection(projection: MessageRenderProjection): () => void;
+	/** Configure native Markdown regions before Pi lays out their components. */
+	addRegionPresentation(renderer: MessageRegionRenderer): () => void;
+	/** Resolve message padding before native components render at a given width. */
+	setOutputPadding(padding: MessageOutputPadding | undefined): void;
+	/** Resolve a narrower native render width; Pi pads the native rows and keeps hit testing aligned. */
+	setNativeRenderWidth(resolver: MessageNativeWidthResolver | undefined, options?: MessageNativeWidthOptions): void;
+	/** Add a component before the native message content, preserving component geometry. */
+	addLeadingComponent(factory: MessageLeadingComponentFactory): () => void;
+}
+
+/** Additional display-text hook available for user messages. */
+export interface UserMessagePresentationTarget extends MessagePresentationTargetBase {
+	readonly role: "user";
+	/** Replace displayed user text without mutating the stored message. */
+	setDisplayText(resolver: ((context: MessagePresentationContext) => string | undefined) | undefined): void;
+}
+
+export interface AssistantMessagePresentationTarget extends MessagePresentationTargetBase {
+	readonly role: "assistant";
+	/** Collapse nonempty thinking runs once when this message completes. */
+	setCollapseThinkingOnComplete(collapse: boolean): void;
+}
+
+/** A narrow view of a rendered transcript message. */
+export type MessagePresentationTarget = UserMessagePresentationTarget | AssistantMessagePresentationTarget;
+
+export type QueuedMessageKind = "steering" | "followUp";
+
+export interface QueuedMessageComponentOptions {
+	readonly literal?: boolean;
+	/** Style literal rows without changing the native panel or queue ownership. */
+	readonly literalTextStyle?: (content: string) => string;
+}
+
+export interface QueuedMessagePresentationContext {
+	readonly kind: QueuedMessageKind;
+	readonly text: string;
+	/** Create a display-only user component using Pi's current theme and settings. */
+	readonly createUserMessage: (options?: QueuedMessageComponentOptions) => Component & UserMessagePresentationTarget;
+}
+
+/** Replace one queued summary component while Pi retains queue state and controls. */
+export type QueuedMessagePresentationFactory = (context: QueuedMessagePresentationContext) => Component | undefined;
+
+export type MessagePresentationContext = {
+	readonly role: MessagePresentationRole;
+	readonly message: unknown;
+	readonly isStreaming: boolean;
+	/** Terminal width available to width-aware display-text resolvers. */
+	readonly width: number;
+};
+
+/**
+ * Transform the rows produced by the native message component.
+ * Returning undefined keeps the rows unchanged. Projections run in registration order.
+ */
+export type MessageRenderProjection = (context: {
+	readonly role: MessagePresentationRole;
+	readonly message: unknown;
+	readonly isStreaming: boolean;
+	readonly width: number;
+	readonly nativeLines: readonly string[];
+}) => string[] | undefined;
+
+/** Factory used by the interactive transcript to attach a message projection. */
+export type MessagePresentationFactory = (target: MessagePresentationTarget) => void;
+
+/** Associates an extension entry with the most recent compatible transcript message. Return true to consume the entry. */
+export type MessageEntryAssociation = (
+	target: MessagePresentationTarget,
+	entry: CustomEntry<unknown>,
+) => boolean | undefined;
+
+export interface ToolImageBounds {
+	readonly width: number;
+	readonly height: number;
+}
+
+/** Context for transforming one tool-result image's terminal rows. */
+export interface ToolImageRenderContext {
+	readonly index: number;
+	readonly width: number;
+	/** Width passed to the native Image renderer after presentation layout. */
+	readonly renderWidth: number;
+	readonly expanded: boolean;
+	readonly hasOverlay: boolean;
+	/** True when this is the final image view attached for the tool result. */
+	readonly isLastImage: boolean;
+	readonly nativeLines: readonly string[];
+	readonly bounds: ToolImageBounds;
+	/** Position of this tool call in an active transcript group, when configured. */
+	readonly group?: ToolGroupMemberRenderContext;
+	readonly setExpanded: (expanded: boolean) => void;
+}
+
+/** Presentation hooks for tool-result images. The native Image component remains the source of rows. */
+export interface ToolImagePresentation {
+	/** Resolve the native image width from the enclosing tool width. Invalid values use the full width. */
+	readonly getRenderWidth?: (width: number) => number;
+	/** Limit preview image height while the tool output is collapsed. */
+	readonly previewHeightCells?: number;
+	/** Rows before each native image view. Defaults to one row and is capped at ten. */
+	readonly spacingRows?: number;
+	/** Transform image rows, for example to add an indentation gutter or hide them under an overlay. */
+	readonly render?: (context: ToolImageRenderContext, theme: Theme) => string[] | undefined;
+	/** Handle a click in image-local coordinates. Return true when the event was consumed. */
+	readonly onClick?: (
+		context: ToolImageRenderContext & { readonly x: number; readonly y: number },
+	) => boolean | undefined;
+}
+
+/** Aggregate state for a contiguous group of tool executions in the transcript. */
+export interface ToolGroupRenderContext {
+	readonly key: string;
+	readonly size: number;
+	/** Elapsed time from the earliest execution start to the latest execution finish, when known. */
+	readonly elapsedMs?: number;
+	/** Number of group members that have not completed yet. */
+	readonly pending: number;
+	/** Number of group members that completed with an error. */
+	readonly failed: number;
+	/** True when every group member is expanded. */
+	readonly expanded: boolean;
+	/** Expand or collapse every native tool execution in this group. */
+	readonly setExpanded: (expanded: boolean) => void;
+}
+
+/** Position within a tool group. Index and size may change while a transcript group is active. */
+export interface ToolGroupMemberRenderContext {
+	readonly key: string;
+	readonly index: number;
+	readonly size: number;
+}
+
+/** Presentation for a contiguous sequence of native tool executions. */
+export interface ToolGroupPresentation {
+	/** Return a shared key for tools that should be grouped, or undefined to break the sequence. */
+	readonly groupKey: (toolName: string) => string | undefined;
+	/** Render the shared header, hosted by the first native tool execution in the group. */
+	readonly renderHeader: (context: ToolGroupRenderContext, theme: Theme) => Component;
 }
 
 /** Wrap the current autocomplete provider with additional behavior. */
@@ -297,6 +521,26 @@ export interface ExtensionUIContext {
 
 	/** Set tool output expansion state. */
 	setToolsExpanded(expanded: boolean): void;
+
+	/**
+	 * Attach a typed row projection to user and assistant transcript messages.
+	 * This is available in interactive TUI mode; other modes may omit it.
+	 */
+	setMessagePresentation?: (key: string, factory: MessagePresentationFactory | undefined) => void;
+
+	/** Associate a custom session entry with the most recent transcript message of its kind. */
+	setMessageEntryAssociation?: (customType: string, association: MessageEntryAssociation | undefined) => void;
+
+	/** Filter status rows before they are added to the transcript. Return false to suppress a row. */
+	setStatusFilter?: (key: string, filter: ((message: string) => boolean) | undefined) => void;
+
+	/** Configure image row presentation for all executions of a tool name. */
+	setToolImagePresentation?: (toolName: string, presentation: ToolImagePresentation | undefined) => void;
+	/** Group consecutive native tool executions in the interactive transcript. */
+	setToolGroupPresentation?: (presentation: ToolGroupPresentation | undefined) => void;
+
+	/** Configure display-only queued message components; queue state and editing stay native. */
+	setQueuedMessagePresentation?: (factory: QueuedMessagePresentationFactory | undefined) => void;
 }
 
 // ============================================================================
@@ -487,8 +731,12 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 	expanded: boolean;
 	/** Whether inline images are currently shown in the TUI. */
 	showImages: boolean;
+	/** Whether native image views are attached for this tool result. */
+	hasRenderedImages: boolean;
 	/** Whether the current result is an error. */
 	isError: boolean;
+	/** Position of this tool call in an active transcript group, when configured. */
+	group?: ToolGroupMemberRenderContext;
 }
 
 /**
@@ -1113,7 +1361,7 @@ export interface UserBashEvent {
 // ============================================================================
 
 /** Source of user input */
-export type InputSource = "interactive" | "rpc" | "extension";
+export type InputSource = "interactive" | "rpc" | "extension" | "remote";
 
 /** Fired when user input is received, before agent processing */
 export interface InputEvent {
@@ -1688,6 +1936,9 @@ export interface ExtensionAPI {
 		options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
 	): void;
 
+	/** Get a narrow controller for the current live AgentSession, when supported by the mode. */
+	getSessionController?(): SessionController;
+
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
@@ -1872,6 +2123,14 @@ export interface ExtensionVirtualModel<TState = unknown> extends Omit<VirtualMod
 	route(request: ModelRouteRequest<TState>, ctx: ExtensionContext): ModelRoute<TState> | Promise<ModelRoute<TState>>;
 }
 
+/** A provider-owned login flow invoked from the interactive /login menu. */
+export interface ExternalLoginConfig {
+	/** Auth method label used by the /login UI. Credentials remain owned by the extension. */
+	authType: "oauth" | "api_key";
+	/** Run the login flow. The handler owns its completion UI and credential storage. */
+	handler(context: ExtensionCommandContext): Promise<void>;
+}
+
 /** Configuration for registering a provider via pi.registerProvider(). */
 export interface ProviderConfig {
 	/** Display name for the provider in UI. */
@@ -1912,6 +2171,8 @@ export interface ProviderConfig {
 	 * Use context.publish({ persist: entry }) when the catalog should persist across sessions.
 	 */
 	refreshModels?(context: RefreshModelsContext): Promise<ProviderModelConfig[]>;
+	/** Use an extension-owned login flow instead of Pi's native auth flow for this provider. */
+	externalLogin?: ExternalLoginConfig;
 	/** OAuth provider for /login support. The `id` is set automatically from the provider name. */
 	oauth?: {
 		/** Display name for the provider in login UI. */
@@ -2055,6 +2316,8 @@ export type SendUserMessageHandler = (
 	options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
 ) => void;
 
+export type GetSessionControllerHandler = () => SessionController;
+
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
 export type SetSessionNameHandler = (name: string) => void;
@@ -2109,6 +2372,8 @@ export interface ExtensionRuntimeState {
 	invalidate: (message?: string) => void;
 	/** Retain an event-bus subscription until this runtime is invalidated. */
 	trackEventBusSubscription: (unsubscribe: () => void) => () => void;
+	/** Retain a session-event subscription until this runtime is invalidated. */
+	trackSessionSubscription?: (unsubscribe: () => void) => () => void;
 	/**
 	 * Register or unregister a provider.
 	 *
@@ -2144,6 +2409,8 @@ export interface ExtensionActions {
 	setModel: SetModelHandler;
 	getThinkingLevel: GetThinkingLevelHandler;
 	setThinkingLevel: SetThinkingLevelHandler;
+	/** Optional to preserve compatibility with existing ExtensionActions mocks. */
+	getSessionController?: GetSessionControllerHandler;
 }
 
 /**

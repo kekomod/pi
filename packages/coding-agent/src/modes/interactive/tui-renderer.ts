@@ -1,4 +1,4 @@
-import type { Terminal, WheelScrollLines } from "@earendil-works/pi-tui";
+import type { Terminal, TuiRendererChangeListener, WheelScrollLines } from "@earendil-works/pi-tui";
 import { ProcessTerminal, type TUI, TuiAltScreen, TuiMainScreen } from "@earendil-works/pi-tui";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
@@ -49,10 +49,88 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 	return new TuiMainScreen(terminal, options.showHardwareCursor, options.logDirectory);
 }
 
+type ViewportListenerProperty = "addViewportInputListener" | "addViewportRenderHook";
+
+interface ViewportListenerRegistration {
+	readonly property: ViewportListenerProperty;
+	readonly args: readonly unknown[];
+	boundTui: TUI;
+	unsubscribe: () => void;
+}
+
+interface InteractiveTuiReferenceController {
+	rebind(): void;
+}
+
+const interactiveTuiReferenceControllers = new WeakMap<TUI, InteractiveTuiReferenceController>();
+
+function isViewportListenerProperty(property: string | symbol): property is ViewportListenerProperty {
+	return property === "addViewportInputListener" || property === "addViewportRenderHook";
+}
+
+function asDisposer(value: unknown): () => void {
+	return typeof value === "function" ? (value as () => void) : () => {};
+}
+
+/** Rebind viewport registrations after the active InteractiveMode renderer changes. */
+export function rebindInteractiveTuiReference(reference: TUI): void {
+	interactiveTuiReferenceControllers.get(reference)?.rebind();
+}
+
 /** Stable reference for components while InteractiveMode replaces the active renderer. */
 export function createInteractiveTuiReference(getTui: () => TUI): TUI {
-	return new Proxy({} as TUI, {
+	const registrations = new Set<ViewportListenerRegistration>();
+	const rendererListeners = new Set<TuiRendererChangeListener>();
+	let wheelScrollLineArgs: readonly unknown[] | undefined;
+	let lastNotifiedRenderer: TUI | undefined;
+	const notifyRendererListeners = (renderer: TUI): void => {
+		if (renderer === lastNotifiedRenderer) return;
+		lastNotifiedRenderer = renderer;
+		for (const listener of [...rendererListeners]) listener(renderer);
+	};
+	const controller: InteractiveTuiReferenceController = {
+		rebind: () => {
+			const currentTui = getTui();
+			for (const registration of registrations) {
+				if (registration.boundTui === currentTui) continue;
+				registration.unsubscribe();
+				const method = Reflect.get(currentTui, registration.property, currentTui);
+				if (typeof method !== "function") {
+					registration.boundTui = currentTui;
+					registration.unsubscribe = () => {};
+					continue;
+				}
+				const unsubscribe = Reflect.apply(method, currentTui, registration.args);
+				registration.boundTui = currentTui;
+				registration.unsubscribe = asDisposer(unsubscribe);
+			}
+
+			if (wheelScrollLineArgs !== undefined) {
+				const setWheelScrollLines = Reflect.get(currentTui, "setWheelScrollLines", currentTui);
+				if (typeof setWheelScrollLines === "function") {
+					Reflect.apply(setWheelScrollLines, currentTui, wheelScrollLineArgs);
+				}
+			}
+
+			notifyRendererListeners(currentTui);
+		},
+	};
+	const reference = new Proxy({} as TUI, {
 		get: (_target, property) => {
+			if (property === "onRendererChange") {
+				return (listener: TuiRendererChangeListener): (() => void) => {
+					const currentTui = getTui();
+					rendererListeners.add(listener);
+					lastNotifiedRenderer = currentTui;
+					try {
+						listener(currentTui);
+					} catch (error) {
+						rendererListeners.delete(listener);
+						throw error;
+					}
+					return () => rendererListeners.delete(listener);
+				};
+			}
 			const tui = getTui();
 			const value = Reflect.get(tui, property, tui);
 			if (typeof value !== "function") return value;
@@ -68,14 +146,31 @@ export function createInteractiveTuiReference(getTui: () => TUI): TUI {
 					methodTui = currentTui;
 					method = currentMethod;
 				}
-				return Reflect.apply(method, methodTui, args);
+				const result = Reflect.apply(method, methodTui, args);
+				if (isViewportListenerProperty(property) && typeof result === "function") {
+					const registration: ViewportListenerRegistration = {
+						property,
+						args,
+						boundTui: methodTui,
+						unsubscribe: asDisposer(result),
+					};
+					registrations.add(registration);
+					return () => {
+						if (!registrations.delete(registration)) return;
+						registration.unsubscribe();
+					};
+				}
+				if (property === "setWheelScrollLines") wheelScrollLineArgs = args;
+				return result;
 			};
 		},
 		set: (_target, property, value) => {
 			const tui = getTui();
 			return Reflect.set(tui, property, value, tui);
 		},
-		has: (_target, property) => Reflect.has(getTui(), property),
+		has: (_target, property) => property === "onRendererChange" || Reflect.has(getTui(), property),
 		getPrototypeOf: () => Reflect.getPrototypeOf(getTui()),
 	});
+	interactiveTuiReferenceControllers.set(reference, controller);
+	return reference;
 }
