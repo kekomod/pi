@@ -2078,7 +2078,14 @@ export class AgentSession {
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
 		if (this._isEmittingAgentSettled) {
-			this._deferredSettledActions.push(async () => await this.prompt(text, options));
+			options?.preflightValidation?.();
+			if (options?.preflightResult) {
+				const { preflightResult, ...deferredOptions } = options;
+				preflightResult("queued");
+				this._deferredSettledActions.push(async () => await this.prompt(text, deferredOptions));
+			} else {
+				this._deferredSettledActions.push(async () => await this.prompt(text, options));
+			}
 			return;
 		}
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;

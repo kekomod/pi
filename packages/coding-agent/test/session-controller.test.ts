@@ -2,7 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ExtensionAPI, SessionController } from "../src/index.ts";
+import type { ExtensionAPI, SessionController, SessionControllerPromptAcceptance } from "../src/index.ts";
 import { createHarness, getMessageText, type Harness } from "./suite/harness.ts";
 
 const PNG_DATA = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
@@ -89,6 +89,30 @@ describe("live session controller", () => {
 		releaseTool.resolve();
 		await harness.session.waitForIdle();
 		unsubscribeTui();
+	});
+
+	it("accepts prompts queued during the agent-settled event", async () => {
+		let queuedPrompt: Promise<SessionControllerPromptAcceptance> | undefined;
+		let queued = false;
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const controller = harness.session.getSessionController();
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (queued || event.type !== "agent_settled") return;
+			queued = true;
+			queuedPrompt = controller.prompt("queued at settled boundary");
+		});
+		harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
+
+		await harness.session.prompt("initial");
+		unsubscribe();
+
+		expect(queuedPrompt).toBeDefined();
+		expect(await queuedPrompt).toEqual({ accepted: true });
+		expect(harness.session.messages.filter((message) => message.role === "user").map(getMessageText)).toEqual([
+			"initial",
+			"queued at settled boundary",
+		]);
 	});
 
 	it("publishes detached, bounded snapshots without request configuration", async () => {
