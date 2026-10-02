@@ -190,6 +190,19 @@ describe("AgentSession MCP integration", () => {
 		return { harness, calls, servers, notifications };
 	}
 
+	it("closes configured transports before replacing the active session", async () => {
+		const { harness, servers } = await setup("codemode");
+		const firstClosed = vi.fn();
+		servers[0].onClose(firstClosed);
+		await harness.session.extensionRunner.emit({ type: "session_start", reason: "new" });
+		await vi.waitFor(() => expect(servers).toHaveLength(2));
+		expect(firstClosed).toHaveBeenCalledOnce();
+		const secondClosed = vi.fn();
+		servers[1].onClose(secondClosed);
+		await harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		expect(secondClosed).toHaveBeenCalledOnce();
+	});
+
 	function declaredToolNames(harness: Harness): string[] {
 		return harness.session.messages
 			.filter((message): message is SystemMessage => message.role === "system")

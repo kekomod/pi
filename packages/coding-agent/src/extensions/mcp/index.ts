@@ -995,6 +995,7 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 			modelRegistry = ctx.modelRegistry;
 			const current = ++generation;
 			sessionActive = true;
+			const closing = Promise.all(connections().map((connection) => connection.close()));
 			configuredEntries = loaded.servers;
 			const registered = registeredServers();
 			overridden = registered.overridden;
@@ -1006,11 +1007,13 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 			const enabled = servers.filter(isEnabled);
 			if (enabled.length === 0) {
 				reportProblems(ctx);
-				return;
+				return closing.then(() => undefined);
 			}
 			// The MCP client loads only now, so sessions without servers never pay for it. Waiting one
 			// event loop turn lets the first render happen before loading and connecting.
-			const runtime = new Promise((resolve) => setImmediate(resolve)).then(() => loadMcpRuntime());
+			const runtime = closing
+				.then(() => new Promise((resolve) => setImmediate(resolve)))
+				.then(() => loadMcpRuntime());
 			const isCurrent = () => current === generation;
 			pending = Promise.all(enabled.map((server) => startConnection(server, isCurrent, runtime)))
 				.then(() => {
