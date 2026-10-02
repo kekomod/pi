@@ -588,7 +588,7 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 				throw new Error(`MCP server "${name}" is unavailable: ${state}.`);
 			}
 		};
-		registerMcpServerReadinessResolver(pi.events, waitForMcpServer);
+		let unregisterReadiness: (() => void) | undefined;
 
 		/**
 		 * One message for everything that needs the user after startup, or only for `only`, servers
@@ -982,6 +982,8 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 		};
 
 		pi.on("session_start", (_event, ctx) => {
+			unregisterReadiness?.();
+			unregisterReadiness = registerMcpServerReadinessResolver(pi.events, waitForMcpServer);
 			sessionController.abort(new Error("MCP session changed"));
 			sessionController = new AbortController();
 			const loaded = (options.loadConfig ?? defaultLoadConfig)(ctx);
@@ -1120,6 +1122,8 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 		});
 
 		pi.on("session_shutdown", async () => {
+			unregisterReadiness?.();
+			unregisterReadiness = undefined;
 			sessionActive = false;
 			sessionController.abort(new Error("MCP session ended"));
 			generation++;

@@ -2,7 +2,6 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
 	Container,
 	Markdown,
-	type MarkdownOptions,
 	type MarkdownTheme,
 	MouseRegion,
 	Spacer,
@@ -41,7 +40,6 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 	private hiddenThinkingLabel: string;
 	private outputPad: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
-	private markdownRuntime: Pick<MarkdownOptions, "refresh" | "hasOverlay"> = {};
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
@@ -55,7 +53,6 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 	private collapsedThinkingOnComplete = false;
 	private nativeLayout?: {
 		readonly outerWidth: number;
-		readonly overlayVisible: boolean;
 		readonly nativeWidth: number;
 		readonly probeLines: string[];
 		readonly renderedLines?: string[];
@@ -111,18 +108,6 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
-	}
-
-	/** Bind asynchronous block updates to this message and its current terminal renderer. */
-	setMarkdownRuntime(refresh: () => void, hasOverlay: () => boolean): void {
-		this.markdownRuntime = {
-			refresh: () => {
-				this.invalidate();
-				refresh();
-			},
-			hasOverlay,
-		};
-		this.invalidate();
 	}
 
 	setCollapseThinkingOnComplete(collapse: boolean): void {
@@ -217,9 +202,7 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 		if (!resolver) {
 			return { lines: this.renderNative(width), nativeWidth: width };
 		}
-		const overlayVisible = this.markdownRuntime.hasOverlay?.() ?? false;
-		const cached =
-			this.cacheNativeProbe && this.nativeLayout?.overlayVisible === overlayVisible ? this.nativeLayout : undefined;
+		const cached = this.cacheNativeProbe ? this.nativeLayout : undefined;
 		const sameWidth = cached?.outerWidth === width;
 		const initial = sameWidth ? cached.probeLines : this.renderNative(width);
 		let nativeWidth = width;
@@ -236,7 +219,7 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 		} catch {
 			// Keep the full-width native message when an optional resolver fails.
 		}
-		this.nativeLayout = { outerWidth: width, overlayVisible, nativeWidth, probeLines: initial };
+		this.nativeLayout = { outerWidth: width, nativeWidth, probeLines: initial };
 		if (sameWidth && cached && cached.nativeWidth === nativeWidth) {
 			if (nativeWidth === width) return { lines: initial, nativeWidth };
 			const lines = cached.renderedLines ?? this.renderNative(nativeWidth);
@@ -248,7 +231,6 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 		if (this.cacheNativeProbe)
 			this.nativeLayout = {
 				outerWidth: width,
-				overlayVisible,
 				nativeWidth,
 				probeLines: initial,
 				renderedLines: lines,
@@ -366,7 +348,6 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 						presentation.defaultTextStyle,
 						mergeMarkdownOptions(
 							{
-								...this.markdownRuntime,
 								transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
 							},
 							presentation.markdownOptions,
@@ -424,7 +405,6 @@ export class AssistantMessageComponent extends Container implements AssistantMes
 							},
 							mergeMarkdownOptions(
 								{
-									...this.markdownRuntime,
 									transform: createMarkdownTransform(
 										"assistant-thinking",
 										this.isStreaming,

@@ -2635,12 +2635,6 @@ export class InteractiveMode {
 	}
 
 	private attachMessagePresentations(target: MessagePresentationTarget): void {
-		if (target instanceof UserMessageComponent || target instanceof AssistantMessageComponent) {
-			target.setMarkdownRuntime(
-				() => this.ui.requestRender(),
-				() => this.ui.hasOverlay(),
-			);
-		}
 		for (const factory of this.messagePresentationFactories.values()) {
 			try {
 				factory(target);

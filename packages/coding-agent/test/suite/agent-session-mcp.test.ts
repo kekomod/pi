@@ -968,6 +968,25 @@ describe("AgentSession MCP servers registered by extensions", () => {
 		expect(harness.session.getCallableToolNames()).toContain("mcp__late__search");
 	});
 
+	it("cancels pending readiness at shutdown and rebinds it for the next session", async () => {
+		let api: ExtensionAPI | undefined;
+		const { harness } = await setup(
+			(pi) => {
+				api = pi;
+			},
+			[],
+			() => 25,
+		);
+		if (!api) throw new Error("No extension API");
+		api.registerMcpServer("late", { url: "http://late.invalid" });
+		const stopped = expect(api.waitForMcpServer("late")).rejects.toThrow(/session ended/u);
+		await harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "new" });
+		await stopped;
+		await expect(api.waitForMcpServer("late")).rejects.toThrow(/built-in MCP extension is unavailable/u);
+		await harness.session.extensionRunner.emit({ type: "session_start", reason: "new" });
+		await expect(api.waitForMcpServer("late")).resolves.toBeUndefined();
+	});
+
 	it("reports missing, disabled, and unavailable native MCP support", async () => {
 		let api: ExtensionAPI | undefined;
 		const disabled: McpServerEntry = {

@@ -2,7 +2,6 @@ import {
 	Box,
 	Container,
 	Markdown,
-	type MarkdownOptions,
 	type MarkdownTheme,
 	Spacer,
 	Text,
@@ -53,7 +52,6 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 	private markdownTheme: MarkdownTheme;
 	private outputPad: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
-	private markdownRuntime: Pick<MarkdownOptions, "refresh" | "hasOverlay"> = {};
 	private projections = new Set<MessageRenderProjection>();
 	private regionRenderers = new Set<MessageRegionRenderer>();
 	private leadingComponentFactories = new Set<MessageLeadingComponentFactory>();
@@ -62,7 +60,6 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 	private cacheNativeProbe = false;
 	private nativeLayout?: {
 		readonly outerWidth: number;
-		readonly overlayVisible: boolean;
 		readonly nativeWidth: number;
 		readonly probeLines: string[];
 		readonly renderedLines?: string[];
@@ -100,18 +97,6 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 
 	setOutputPad(padding: number): void {
 		this.outputPad = padding;
-		this.rebuild();
-	}
-
-	/** Bind asynchronous block updates to this message and its current terminal renderer. */
-	setMarkdownRuntime(refresh: () => void, hasOverlay: () => boolean): void {
-		this.markdownRuntime = {
-			refresh: () => {
-				this.invalidate();
-				refresh();
-			},
-			hasOverlay,
-		};
 		this.rebuild();
 	}
 
@@ -218,7 +203,6 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 					},
 					mergeMarkdownOptions(
 						{
-							...this.markdownRuntime,
 							preserveOrderedListMarkers: true,
 							preserveBackslashEscapes: true,
 							transform: createMarkdownTransform("user", false, this.markdownTransformers),
@@ -271,9 +255,7 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		if (!resolver) {
 			return { lines: this.renderNative(width), nativeWidth: width };
 		}
-		const overlayVisible = this.markdownRuntime.hasOverlay?.() ?? false;
-		const cached =
-			this.cacheNativeProbe && this.nativeLayout?.overlayVisible === overlayVisible ? this.nativeLayout : undefined;
+		const cached = this.cacheNativeProbe ? this.nativeLayout : undefined;
 		const sameWidth = cached?.outerWidth === width;
 		const initial = sameWidth ? cached.probeLines : this.renderNative(width);
 		let nativeWidth = width;
@@ -290,7 +272,7 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		} catch {
 			// Keep the full-width native message when an optional resolver fails.
 		}
-		this.nativeLayout = { outerWidth: width, overlayVisible, nativeWidth, probeLines: initial };
+		this.nativeLayout = { outerWidth: width, nativeWidth, probeLines: initial };
 		if (sameWidth && cached && cached.nativeWidth === nativeWidth) {
 			if (nativeWidth === width) return { lines: initial, nativeWidth };
 			const lines = cached.renderedLines ?? this.renderNative(nativeWidth);
@@ -302,7 +284,6 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 		if (this.cacheNativeProbe)
 			this.nativeLayout = {
 				outerWidth: width,
-				overlayVisible,
 				nativeWidth,
 				probeLines: initial,
 				renderedLines: lines,

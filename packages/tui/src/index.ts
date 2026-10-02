@@ -47,7 +47,6 @@ export { Loader, type LoaderIndicatorOptions } from "./components/loader.ts";
 export {
 	type DefaultTextStyle,
 	Markdown,
-	type MarkdownCodeBlockRenderContext,
 	type MarkdownOptions,
 	type MarkdownTableRenderContext,
 	type MarkdownTableRenderer,

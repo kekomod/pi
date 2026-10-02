@@ -1,7 +1,7 @@
 import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens } from "marked";
 import { renderLatex } from "../latex.ts";
-import { getCapabilities, getKittyImageMetadata, hyperlink, isImageLine } from "../terminal-image.ts";
-import { type Component, dispatchMouseEvent, type TuiMouseDispatchResult, type TuiMouseEvent } from "../tui.ts";
+import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
+import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
@@ -226,21 +226,6 @@ export interface MarkdownTokenRenderContext {
 	readonly renderNative: (token?: Token) => string[];
 }
 
-/** Context for a block component that replaces a parsed fenced code block. */
-export interface MarkdownCodeBlockRenderContext {
-	readonly token: Tokens.Code;
-	readonly width: number;
-	/** Source-order ordinal among fenced code blocks in this Markdown region. */
-	readonly index: number;
-	readonly nextTokenType?: string;
-	/** Render through Pi's existing block presentation hook and native code frame. */
-	readonly renderNative: (token?: Tokens.Code) => string[];
-	/** Invalidate this message and schedule a terminal redraw after component state changes. */
-	readonly refresh: () => void;
-	/** Read current overlay state; image-backed blocks should blank image rows beneath overlays. */
-	readonly hasOverlay: () => boolean;
-}
-
 /** Context passed to a table presentation hook. */
 export interface MarkdownTableRenderContext {
 	readonly token: Tokens.Table;
@@ -266,12 +251,6 @@ export interface MarkdownOptions {
 	renderLatex?: boolean;
 	/** Customize a block token while retaining access to the native renderer. */
 	renderToken?: MarkdownTokenRenderer;
-	/** Replace fenced code blocks with retained components that can render images and handle input. */
-	renderCodeBlock?: (context: MarkdownCodeBlockRenderContext) => Component | undefined;
-	/** Invalidate the owning message and request a redraw after a rendered block changes. */
-	refresh?: () => void;
-	/** Read current overlay state for components that need to hide image rows beneath overlays. */
-	hasOverlay?: () => boolean;
 	/** Customize table presentation while retaining native parsing and cell rendering. */
 	renderTable?: MarkdownTableRenderer;
 }
@@ -279,47 +258,6 @@ export interface MarkdownOptions {
 interface InlineStyleContext {
 	applyText: (text: string) => string;
 	stylePrefix: string;
-}
-
-type ComponentLineTransform = (line: string, row: number, reserved: boolean) => string;
-
-interface MarkdownCodeBlockRegion {
-	component: Component;
-	token: Tokens.Code;
-	index: number;
-	width: number;
-	nextTokenType?: string;
-	styleContext?: InlineStyleContext;
-	startRow: number;
-	height: number;
-	reservedRows: ReadonlySet<number>;
-	transforms: ComponentLineTransform[];
-	columnOffset: number;
-	finalStartRow?: number;
-}
-
-interface RenderedMarkdownToken {
-	lines: string[];
-	codeBlocks: MarkdownCodeBlockRegion[];
-}
-
-function componentRegionAt(
-	regions: readonly MarkdownCodeBlockRegion[],
-	row: number,
-): MarkdownCodeBlockRegion | undefined {
-	return regions.find((region) => row >= region.startRow && row < region.startRow + region.height);
-}
-
-function reservedImageRows(lines: readonly string[]): Set<number> {
-	const reserved = new Set<number>();
-	for (let row = 0; row < lines.length; row++) {
-		const metadata = getKittyImageMetadata(lines[row] ?? "");
-		if (!metadata) continue;
-		for (let imageRow = row + 1; imageRow < row + metadata.rows && imageRow < lines.length; imageRow++) {
-			if (lines[imageRow] === "") reserved.add(imageRow);
-		}
-	}
-	return reserved;
 }
 
 export class Markdown implements Component {
@@ -339,8 +277,6 @@ export class Markdown implements Component {
 	// about ten times the size of its source, and every message of a long transcript keeps a Markdown component. The
 	// tokens survive a burst of re-renders, such as a theme preview, and are collected afterwards.
 	private cachedTokens?: WeakRef<{ source: string; tokens: Token[] }>;
-	private cachedCodeBlocks: MarkdownCodeBlockRegion[] = [];
-	private codeBlockIndex = 0;
 
 	constructor(
 		text: string,
@@ -364,370 +300,15 @@ export class Markdown implements Component {
 	}
 
 	invalidate(): void {
-		for (const region of this.cachedCodeBlocks) region.component.invalidate?.();
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
-		this.cachedCodeBlocks = [];
-	}
-
-	private createCodeBlockContext(
-		token: Tokens.Code,
-		width: number,
-		index: number,
-		nextTokenType: string | undefined,
-		styleContext: InlineStyleContext | undefined,
-	): MarkdownCodeBlockRenderContext {
-		return {
-			token,
-			width,
-			index,
-			nextTokenType,
-			renderNative: (nativeToken = token) => this.renderLegacyToken(nativeToken, width, nextTokenType, styleContext),
-			refresh: () => {
-				this.invalidate();
-				this.options.refresh?.();
-			},
-			hasOverlay: () => this.options.hasOverlay?.() ?? false,
-		};
-	}
-
-	private renderLegacyToken(
-		token: Tokens.Code,
-		width: number,
-		nextTokenType?: string,
-		styleContext?: InlineStyleContext,
-	): string[] {
-		return this.renderToken(token, width, nextTokenType, styleContext);
-	}
-
-	private appendRenderedToken(
-		lines: string[],
-		regions: MarkdownCodeBlockRegion[],
-		rendered: RenderedMarkdownToken,
-	): void {
-		const offset = lines.length;
-		lines.push(...rendered.lines);
-		for (const region of rendered.codeBlocks) {
-			region.startRow += offset;
-			regions.push(region);
-		}
-	}
-
-	private applyContainerTokenRenderer(
-		token: Token,
-		width: number,
-		nextTokenType: string | undefined,
-		native: RenderedMarkdownToken,
-	): RenderedMarkdownToken {
-		if (!this.options.renderToken) return native;
-		let lines: string[];
-		try {
-			lines =
-				this.options.renderToken({
-					token,
-					width,
-					nextTokenType,
-					renderNative: () => native.lines,
-				}) ?? native.lines;
-		} catch {
-			return native;
-		}
-		if (lines.length !== native.lines.length) return { lines, codeBlocks: [] };
-		for (const region of native.codeBlocks) {
-			for (let row = region.startRow; row < region.startRow + region.height; row++) {
-				if (lines[row] !== native.lines[row]) return { lines, codeBlocks: [] };
-			}
-		}
-		return { lines, codeBlocks: native.codeBlocks };
-	}
-
-	private renderTokenWithComponents(
-		token: Token,
-		width: number,
-		nextTokenType?: string,
-		styleContext?: InlineStyleContext,
-	): RenderedMarkdownToken {
-		if (token.type === "code") {
-			const codeToken = token as Tokens.Code;
-			const index = this.codeBlockIndex++;
-			let component: Component | undefined;
-			try {
-				component = this.options.renderCodeBlock?.(
-					this.createCodeBlockContext(codeToken, width, index, nextTokenType, styleContext),
-				);
-			} catch {
-				component = undefined;
-			}
-			if (!component)
-				return { lines: this.renderLegacyToken(codeToken, width, nextTokenType, styleContext), codeBlocks: [] };
-			const lines = component.render(width);
-			return {
-				lines,
-				codeBlocks: [
-					{
-						component,
-						token: codeToken,
-						index,
-						width,
-						nextTokenType,
-						styleContext,
-						startRow: 0,
-						height: lines.length,
-						reservedRows: reservedImageRows(lines),
-						transforms: [],
-						columnOffset: 0,
-					},
-				],
-			};
-		}
-		if (token.type === "list") {
-			return this.applyContainerTokenRenderer(
-				token,
-				width,
-				nextTokenType,
-				this.renderListWithComponents(token as Tokens.List, 0, width, styleContext),
-			);
-		}
-		if (token.type === "blockquote") {
-			return this.applyContainerTokenRenderer(
-				token,
-				width,
-				nextTokenType,
-				this.renderBlockquoteWithComponents(token as Tokens.Blockquote, width, nextTokenType),
-			);
-		}
-		return { lines: this.renderToken(token, width, nextTokenType, styleContext), codeBlocks: [] };
-	}
-
-	private renderListWithComponents(
-		token: Tokens.List,
-		depth: number,
-		width: number,
-		styleContext?: InlineStyleContext,
-	): RenderedMarkdownToken {
-		const lines: string[] = [];
-		const codeBlocks: MarkdownCodeBlockRegion[] = [];
-		const indent = "    ".repeat(depth);
-		const startNumber = typeof token.start === "number" ? token.start : 1;
-
-		for (let i = 0; i < token.items.length; i++) {
-			const item = token.items[i];
-			const isLastItem = i === token.items.length - 1;
-			const bullet = token.ordered
-				? this.options.preserveOrderedListMarkers
-					? (this.getOrderedListMarker(item) ?? `${startNumber + i}. `)
-					: `${startNumber + i}. `
-				: this.options.preserveOrderedListMarkers
-					? (this.getUnorderedListMarker(item) ?? "- ")
-					: "- ";
-			const taskMarker = item.task ? `[${item.checked ? "x" : " "}] ` : "";
-			const marker = bullet + taskMarker;
-			const firstPrefix = indent + this.theme.listBullet(marker);
-			const continuationPrefix = indent + " ".repeat(visibleWidth(marker));
-			const itemWidth = Math.max(1, width - visibleWidth(firstPrefix));
-			let renderedAnyLine = false;
-
-			for (const itemToken of item.tokens) {
-				if (itemToken.type === "list") {
-					const nested = this.renderListWithComponents(itemToken as Tokens.List, depth + 1, width, styleContext);
-					const offset = lines.length;
-					lines.push(...nested.lines);
-					for (const region of nested.codeBlocks) {
-						region.startRow += offset;
-						codeBlocks.push(region);
-					}
-					renderedAnyLine = true;
-					continue;
-				}
-				const child = this.renderTokenWithComponents(itemToken, itemWidth, undefined, styleContext);
-				const rowMap: number[] = [];
-				for (let row = 0; row < child.lines.length; row++) {
-					rowMap[row] = lines.length;
-					const region = componentRegionAt(child.codeBlocks, row);
-					const regionRow = region ? row - region.startRow : -1;
-					const reserved = region?.reservedRows.has(regionRow) ?? false;
-					const prefix = renderedAnyLine ? continuationPrefix : firstPrefix;
-					if (region && reserved) {
-						lines.push("");
-						renderedAnyLine = true;
-					} else if (region) {
-						if (regionRow === 0) {
-							const firstRegionPrefix = prefix;
-							region.transforms.push((line, currentRow, isReserved) => {
-								if (isReserved) return line;
-								return (currentRow === 0 ? firstRegionPrefix : continuationPrefix) + line;
-							});
-							region.columnOffset += visibleWidth(firstRegionPrefix);
-						}
-						lines.push(prefix + (child.lines[row] ?? ""));
-						renderedAnyLine = true;
-					} else {
-						for (const wrappedLine of wrapTextWithAnsi(child.lines[row] ?? "", itemWidth)) {
-							lines.push((renderedAnyLine ? continuationPrefix : firstPrefix) + wrappedLine);
-							renderedAnyLine = true;
-						}
-					}
-				}
-				for (const region of child.codeBlocks) {
-					region.startRow = rowMap[region.startRow] ?? lines.length;
-					codeBlocks.push(region);
-				}
-			}
-
-			if (!renderedAnyLine) lines.push(firstPrefix);
-			if (token.loose && !isLastItem) lines.push("");
-		}
-		return { lines, codeBlocks };
-	}
-
-	private renderBlockquoteWithComponents(
-		token: Tokens.Blockquote,
-		width: number,
-		nextTokenType?: string,
-	): RenderedMarkdownToken {
-		const quoteStyle = (text: string) => this.theme.quote(this.theme.italic(text));
-		const quoteStylePrefix = this.getStylePrefix(quoteStyle);
-		const applyQuoteStyle = (line: string): string => {
-			if (!quoteStylePrefix) return quoteStyle(line);
-			const lineWithReappliedStyle = line.replace(/\x1b\[0m/g, `\x1b[0m${quoteStylePrefix}`);
-			return quoteStyle(lineWithReappliedStyle);
-		};
-		const quoteContentWidth = Math.max(1, width - 2);
-		const quoteInlineStyleContext: InlineStyleContext = {
-			applyText: (text: string) => text,
-			stylePrefix: quoteStylePrefix,
-		};
-		const quoteTokens = token.tokens || [];
-		const lines: string[] = [];
-		const codeBlocks: MarkdownCodeBlockRegion[] = [];
-		for (let i = 0; i < quoteTokens.length; i++) {
-			const child = this.renderTokenWithComponents(
-				quoteTokens[i],
-				quoteContentWidth,
-				quoteTokens[i + 1]?.type,
-				quoteInlineStyleContext,
-			);
-			const rowMap: number[] = [];
-			for (let row = 0; row < child.lines.length; row++) {
-				rowMap[row] = lines.length;
-				const region = componentRegionAt(child.codeBlocks, row);
-				const regionRow = region ? row - region.startRow : -1;
-				const reserved = region?.reservedRows.has(regionRow) ?? false;
-				if (region && reserved) {
-					lines.push("");
-				} else if (region) {
-					if (regionRow === 0) {
-						region.transforms.push((line, _currentRow, isReserved) =>
-							isReserved ? line : this.theme.quoteBorder("│ ") + applyQuoteStyle(line),
-						);
-						region.columnOffset += 2;
-					}
-					lines.push(this.theme.quoteBorder("│ ") + applyQuoteStyle(child.lines[row] ?? ""));
-				} else {
-					const styledLine = applyQuoteStyle(child.lines[row] ?? "");
-					for (const wrappedLine of wrapTextWithAnsi(styledLine, quoteContentWidth)) {
-						lines.push(this.theme.quoteBorder("│ ") + wrappedLine);
-					}
-				}
-			}
-			for (const region of child.codeBlocks) {
-				region.startRow = rowMap[region.startRow] ?? lines.length;
-				codeBlocks.push(region);
-			}
-		}
-
-		while (lines.length > 0) {
-			const lastRow = lines.length - 1;
-			const region = componentRegionAt(codeBlocks, lastRow);
-			if (lines[lastRow] !== "" || region?.reservedRows.has(lastRow - region.startRow)) break;
-			lines.pop();
-			for (const region of codeBlocks) {
-				if (region.startRow >= lines.length) codeBlocks.splice(codeBlocks.indexOf(region), 1);
-			}
-		}
-		if (nextTokenType && nextTokenType !== "space") lines.push("");
-		return { lines, codeBlocks };
-	}
-
-	handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | undefined {
-		for (const region of this.cachedCodeBlocks) {
-			const startRow = region.finalStartRow;
-			if (startRow === undefined || event.y < startRow || event.y >= startRow + region.height) continue;
-			return dispatchMouseEvent(region.component, {
-				...event,
-				x: event.x - this.paddingX - region.columnOffset,
-				y: event.y - startRow,
-				width: region.width,
-				height: region.height,
-			});
-		}
-		return undefined;
-	}
-
-	private refreshCachedCodeBlocks(width: number): string[] | undefined {
-		if (this.cachedCodeBlocks.length === 0) return this.cachedLines;
-		const nextLines = [...(this.cachedLines ?? [])];
-		const leftMargin = " ".repeat(this.paddingX);
-		const rightMargin = " ".repeat(this.paddingX);
-		const bgFn = this.defaultTextStyle?.bgColor;
-
-		for (const region of this.cachedCodeBlocks) {
-			let component: Component | undefined;
-			try {
-				component = this.options.renderCodeBlock?.(
-					this.createCodeBlockContext(
-						region.token,
-						region.width,
-						region.index,
-						region.nextTokenType,
-						region.styleContext,
-					),
-				);
-			} catch {
-				return undefined;
-			}
-			if (!component) return undefined;
-			const componentLines = component.render(region.width);
-			if (componentLines.length !== region.height || region.finalStartRow === undefined) return undefined;
-			region.component = component;
-
-			for (let row = 0; row < region.height; row++) {
-				const outputRow = region.finalStartRow + row;
-				if (outputRow >= nextLines.length) return undefined;
-				const reserved = region.reservedRows.has(row);
-				let line = componentLines[row] ?? "";
-				for (const transform of region.transforms) line = transform(line, row, reserved);
-				if (reserved) {
-					nextLines[outputRow] = "";
-				} else if (isImageLine(line)) {
-					// Keep Kitty's empty continuation rows empty so ScrollView can crop a scrolled image.
-					nextLines[outputRow] = `${leftMargin}${line}`;
-				} else {
-					const lineWithMargins = leftMargin + line + rightMargin;
-					if (bgFn) {
-						nextLines[outputRow] = applyBackgroundToLine(lineWithMargins, width, bgFn);
-					} else {
-						const paddingNeeded = Math.max(0, width - visibleWidth(lineWithMargins));
-						nextLines[outputRow] = lineWithMargins + " ".repeat(paddingNeeded);
-					}
-				}
-			}
-		}
-
-		this.cachedLines = nextLines;
-		return nextLines;
 	}
 
 	render(width: number): string[] {
 		// Check cache
 		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
-			const refreshed = this.refreshCachedCodeBlocks(width);
-			if (refreshed) return refreshed;
-			this.cachedLines = undefined;
-			this.cachedWidth = undefined;
-			this.cachedText = undefined;
-			this.cachedCodeBlocks = [];
+			return this.cachedLines;
 		}
 
 		// Calculate available width for content (subtract horizontal padding)
@@ -741,7 +322,6 @@ export class Markdown implements Component {
 			this.cachedText = this.text;
 			this.cachedWidth = width;
 			this.cachedLines = result;
-			this.cachedCodeBlocks = [];
 			return result;
 		}
 
@@ -759,30 +339,17 @@ export class Markdown implements Component {
 
 		// Convert tokens to styled terminal output
 		const renderedLines: string[] = [];
-		const codeBlocks: MarkdownCodeBlockRegion[] = [];
-		this.codeBlockIndex = 0;
 
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i];
 			const nextToken = tokens[i + 1];
-			const rendered = this.renderTokenWithComponents(token, contentWidth, nextToken?.type);
-			this.appendRenderedToken(renderedLines, codeBlocks, rendered);
+			renderedLines.push(...this.renderToken(token, contentWidth, nextToken?.type));
 		}
 
 		// Wrap lines (NO padding, NO background yet)
 		const wrappedLines: string[] = [];
-		for (let row = 0; row < renderedLines.length; row++) {
-			const line = renderedLines[row] ?? "";
-			const region = componentRegionAt(codeBlocks, row);
-			const regionRow = region ? row - region.startRow : -1;
-			const reserved = region?.reservedRows.has(regionRow) ?? false;
-			if (region && reserved) {
-				region.finalStartRow ??= wrappedLines.length - regionRow;
-				wrappedLines.push("");
-			} else if (region) {
-				region.finalStartRow ??= wrappedLines.length - regionRow;
-				wrappedLines.push(line);
-			} else if (isImageLine(line)) {
+		for (const line of renderedLines) {
+			if (isImageLine(line)) {
 				wrappedLines.push(line);
 			} else {
 				for (const wrappedLine of wrapTextWithAnsi(line, contentWidth)) {
@@ -797,19 +364,7 @@ export class Markdown implements Component {
 		const bgFn = this.defaultTextStyle?.bgColor;
 		const contentLines: string[] = [];
 
-		for (let row = 0; row < wrappedLines.length; row++) {
-			const line = wrappedLines[row] ?? "";
-			const region = codeBlocks.find(
-				(candidate) =>
-					candidate.finalStartRow !== undefined &&
-					row >= candidate.finalStartRow &&
-					row < candidate.finalStartRow + candidate.height,
-			);
-			const reserved = region?.reservedRows.has(row - (region.finalStartRow ?? 0)) ?? false;
-			if (reserved) {
-				contentLines.push("");
-				continue;
-			}
+		for (const line of wrappedLines) {
 			if (isImageLine(line)) {
 				contentLines.push(`${leftMargin}${line}`);
 				continue;
@@ -837,16 +392,12 @@ export class Markdown implements Component {
 
 		// Combine top padding, content, and bottom padding
 		const result = emptyLines.concat(contentLines, emptyLines);
-		for (const region of codeBlocks) {
-			if (region.finalStartRow !== undefined) region.finalStartRow += this.paddingY;
-		}
 		flattenLines(result);
 
 		// Update cache
 		this.cachedText = this.text;
 		this.cachedWidth = width;
 		this.cachedLines = result;
-		this.cachedCodeBlocks = codeBlocks;
 
 		return result.length > 0 ? result : [""];
 	}
@@ -1038,7 +589,7 @@ export class Markdown implements Component {
 			}
 
 			case "list": {
-				lines.push(...this.renderListWithComponents(token as Tokens.List, 0, width, styleContext).lines);
+				lines.push(...this.renderList(token as Tokens.List, 0, width, styleContext));
 				// Don't add spacing after lists if a space token follows
 				// (the space token will handle it)
 				break;
@@ -1051,7 +602,43 @@ export class Markdown implements Component {
 			}
 
 			case "blockquote": {
-				lines.push(...this.renderBlockquoteWithComponents(token as Tokens.Blockquote, width, nextTokenType).lines);
+				const quoteStyle = (text: string) => this.theme.quote(this.theme.italic(text));
+				const quoteStylePrefix = this.getStylePrefix(quoteStyle);
+				const applyQuoteStyle = (line: string): string => {
+					if (!quoteStylePrefix) return quoteStyle(line);
+					const lineWithReappliedStyle = line.replace(/\x1b\[0m/g, `\x1b[0m${quoteStylePrefix}`);
+					return quoteStyle(lineWithReappliedStyle);
+				};
+
+				const quoteContentWidth = Math.max(1, width - 2);
+				const quoteInlineStyleContext: InlineStyleContext = {
+					applyText: (text: string) => text,
+					stylePrefix: quoteStylePrefix,
+				};
+				const quoteTokens = (token as Tokens.Blockquote).tokens || [];
+				const renderedQuoteLines: string[] = [];
+				for (let i = 0; i < quoteTokens.length; i++) {
+					renderedQuoteLines.push(
+						...this.renderToken(
+							quoteTokens[i],
+							quoteContentWidth,
+							quoteTokens[i + 1]?.type,
+							quoteInlineStyleContext,
+						),
+					);
+				}
+
+				while (renderedQuoteLines.length > 0 && renderedQuoteLines[renderedQuoteLines.length - 1] === "") {
+					renderedQuoteLines.pop();
+				}
+
+				for (const quoteLine of renderedQuoteLines) {
+					const styledLine = applyQuoteStyle(quoteLine);
+					for (const wrappedLine of wrapTextWithAnsi(styledLine, quoteContentWidth)) {
+						lines.push(this.theme.quoteBorder("│ ") + wrappedLine);
+					}
+				}
+				if (nextTokenType && nextTokenType !== "space") lines.push("");
 				break;
 			}
 
@@ -1201,6 +788,55 @@ export class Markdown implements Component {
 	private getUnorderedListMarker(item: Tokens.ListItem): string | undefined {
 		const match = /^(?: {0,3})([-+*])(?:[ \t]+|(?=\r?\n|$))/.exec(item.raw);
 		return match ? `${match[1]} ` : undefined;
+	}
+
+	/**
+	 * Render a list with proper nesting support
+	 */
+	private renderList(token: Tokens.List, depth: number, width: number, styleContext?: InlineStyleContext): string[] {
+		const lines: string[] = [];
+		const indent = "    ".repeat(depth);
+		const startNumber = typeof token.start === "number" ? token.start : 1;
+
+		for (let i = 0; i < token.items.length; i++) {
+			const item = token.items[i];
+			const isLastItem = i === token.items.length - 1;
+			const bullet = token.ordered
+				? this.options.preserveOrderedListMarkers
+					? (this.getOrderedListMarker(item) ?? `${startNumber + i}. `)
+					: `${startNumber + i}. `
+				: this.options.preserveOrderedListMarkers
+					? (this.getUnorderedListMarker(item) ?? "- ")
+					: "- ";
+			const taskMarker = item.task ? `[${item.checked ? "x" : " "}] ` : "";
+			const marker = bullet + taskMarker;
+			const firstPrefix = indent + this.theme.listBullet(marker);
+			const continuationPrefix = indent + " ".repeat(visibleWidth(marker));
+			const itemWidth = Math.max(1, width - visibleWidth(firstPrefix));
+			let renderedAnyLine = false;
+
+			for (const itemToken of item.tokens) {
+				if (itemToken.type === "list") {
+					lines.push(...this.renderList(itemToken as Tokens.List, depth + 1, width, styleContext));
+					renderedAnyLine = true;
+					continue;
+				}
+
+				const itemLines = this.renderToken(itemToken, itemWidth, undefined, styleContext);
+				for (const line of itemLines) {
+					for (const wrappedLine of wrapTextWithAnsi(line, itemWidth)) {
+						const linePrefix = renderedAnyLine ? continuationPrefix : firstPrefix;
+						lines.push(linePrefix + wrappedLine);
+						renderedAnyLine = true;
+					}
+				}
+			}
+
+			if (!renderedAnyLine) lines.push(firstPrefix);
+			if (token.loose && !isLastItem) lines.push("");
+		}
+
+		return lines;
 	}
 
 	/**
