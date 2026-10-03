@@ -1,4 +1,4 @@
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { NestedToolCalls } from "@earendil-works/pi-ai";
 import {
 	Box,
 	type Component,
@@ -17,10 +17,9 @@ import type {
 	ToolGroupMemberRenderContext,
 	ToolImagePresentation,
 	ToolImageRenderContext,
+	ToolPresentationRenderers,
 	ToolRenderContext,
-	ToolRenderResultOptions,
 } from "../../../core/extensions/types.ts";
-import type { Theme } from "../theme/theme.ts";
 import type { ToolGroupCoordinator, ToolGroupMemberControl, ToolGroupMembership } from "./tool-groups.ts";
 
 /**
@@ -30,16 +29,7 @@ import type { ToolGroupCoordinator, ToolGroupMemberControl, ToolGroupMembership 
  * The renderer parameters are `any` on purpose: a `ToolDefinition` types them from its schema, and
  * narrowing them here would make those definitions unassignable.
  */
-export interface ToolRenderers {
-	renderShell?: "default" | "self";
-	renderCall?: (args: any, theme: Theme, context: ToolRenderContext<any, any>) => Component;
-	renderResult?: (
-		result: AgentToolResult<any>,
-		options: ToolRenderResultOptions,
-		theme: Theme,
-		context: ToolRenderContext<any, any>,
-	) => Component;
-}
+export type ToolRenderers = ToolPresentationRenderers;
 
 import { formatToolCallWithArgs, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
@@ -133,6 +123,7 @@ export class ToolExecutionComponent extends Container implements ToolImageHost, 
 	private imageViews: ToolImageView[] = [];
 	private lastRenderedImageIndex: number | undefined;
 	private imageSpacers: Spacer[] = [];
+	private groupSpacer: ToolGroupSpacer;
 	private imagePresentation?: ToolImagePresentation;
 	private imageFrames = new Map<number, { context: ToolImageRenderContext; lines: string[] }>();
 	private imageLayout: Array<{ index: number; startY: number; height: number }> = [];
@@ -154,7 +145,9 @@ export class ToolExecutionComponent extends Container implements ToolImageHost, 
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 		isError: boolean;
 		details?: any;
+		nestedCalls?: NestedToolCalls;
 	};
+	private nestedCalls?: NestedToolCalls;
 	private convertedImages: Map<
 		number,
 		{ sourceData: string; sourceMimeType: string; data: string; mimeType: string }
@@ -185,7 +178,7 @@ export class ToolExecutionComponent extends Container implements ToolImageHost, 
 		this.ui = ui;
 		this.cwd = cwd;
 
-		this.addChild(new ToolGroupSpacer(this));
+		this.groupSpacer = new ToolGroupSpacer(this);
 		this.groupHeaderContainer = new Container();
 
 		// Always create all shell variants. contentBox is used for default renderer-based composition.
@@ -199,17 +192,7 @@ export class ToolExecutionComponent extends Container implements ToolImageHost, 
 		this.selfGroupContainer.addChild(this.groupHeaderContainer);
 		this.selfGroupContainer.addChild(this.selfRenderContainer);
 
-		if (this.hasRendererDefinition()) {
-			if (this.getRenderShell() === "self") {
-				this.addChild(this.selfGroupContainer);
-			} else {
-				this.addChild(this.groupHeaderContainer);
-				this.addChild(this.contentBox);
-			}
-		} else {
-			this.addChild(this.groupHeaderContainer);
-			this.addChild(this.contentTextRegion);
-		}
+		this.configureShell();
 
 		if (this.groupCoordinator) this.groupCoordinator.add(this.toolName, this);
 		this.initialized = true;
@@ -271,12 +254,28 @@ export class ToolExecutionComponent extends Container implements ToolImageHost, 
 		if (header) this.groupHeaderContainer.addChild(header);
 	}
 
-	private getCallRenderer(): ToolDefinition<any, any>["renderCall"] | undefined {
+	private getCallRenderer(): ToolPresentationRenderers["renderCall"] | undefined {
 		return this.toolDefinition?.renderCall;
 	}
 
-	private getResultRenderer(): ToolDefinition<any, any>["renderResult"] | undefined {
+	private getResultRenderer(): ToolPresentationRenderers["renderResult"] | undefined {
 		return this.toolDefinition?.renderResult;
+	}
+
+	private configureShell(): void {
+		this.clear();
+		this.addChild(this.groupSpacer);
+		if (this.hasRendererDefinition()) {
+			if (this.getRenderShell() === "self") {
+				this.addChild(this.selfGroupContainer);
+			} else {
+				this.addChild(this.groupHeaderContainer);
+				this.addChild(this.contentBox);
+			}
+		} else {
+			this.addChild(this.groupHeaderContainer);
+			this.addChild(this.contentTextRegion);
+		}
 	}
 
 	private hasRendererDefinition(): boolean {
@@ -291,8 +290,28 @@ export class ToolExecutionComponent extends Container implements ToolImageHost, 
 		return this.toolName;
 	}
 
+	getToolCallId(): string {
+		return this.toolCallId;
+	}
+
 	setImagePresentation(presentation: ToolImagePresentation | undefined): void {
 		this.imagePresentation = presentation;
+		this.updateDisplay();
+		this.ui.requestRender();
+	}
+
+	/** Rebind renderer-only presentation while preserving expansion and renderer state. */
+	setToolRenderers(renderers: ToolPresentationRenderers | undefined): void {
+		this.toolDefinition = renderers;
+		this.callRendererComponent = undefined;
+		this.resultRendererComponent = undefined;
+		this.configureShell();
+		this.updateDisplay();
+		this.ui.requestRender();
+	}
+
+	setNestedCalls(nestedCalls: NestedToolCalls | undefined): void {
+		this.nestedCalls = nestedCalls;
 		this.updateDisplay();
 		this.ui.requestRender();
 	}
@@ -316,6 +335,7 @@ export class ToolExecutionComponent extends Container implements ToolImageHost, 
 			showImages: this.showImages,
 			hasRenderedImages: this.imageViews.length > 0,
 			isError: this.result?.isError ?? false,
+			...(this.nestedCalls ? { nestedCalls: this.nestedCalls } : {}),
 			...(group ? { group } : {}),
 		};
 	}
@@ -387,11 +407,13 @@ export class ToolExecutionComponent extends Container implements ToolImageHost, 
 			content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 			details?: any;
 			isError: boolean;
+			nestedCalls?: NestedToolCalls;
 		},
 		isPartial = false,
 		endTimeMs?: number,
 	): void {
 		this.result = result;
+		if (result.nestedCalls) this.nestedCalls = result.nestedCalls;
 		this.isPartial = isPartial;
 		if (!isPartial && this.executionEndTimeMs === undefined && Number.isFinite(endTimeMs)) {
 			this.executionEndTimeMs = endTimeMs;
@@ -614,7 +636,10 @@ export class ToolExecutionComponent extends Container implements ToolImageHost, 
 				} else {
 					try {
 						const component = resultRenderer(
-							{ content: this.result.content as any, details: this.result.details },
+							{
+								content: this.result.content as any,
+								details: this.result.details,
+							},
 							{ expanded: this.expanded, isPartial: this.isPartial },
 							theme,
 							this.getRenderContext(this.resultRendererComponent),

@@ -7,8 +7,8 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
+import type { AgentMessage, AgentToolCall, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { AuthEvent, AuthPrompt, NestedToolCallRecord, NestedToolCalls } from "@earendil-works/pi-ai";
 import {
 	type AssistantMessage,
 	type ImageContent,
@@ -94,6 +94,9 @@ import type {
 	QueuedMessagePresentationFactory,
 	ToolGroupPresentation,
 	ToolImagePresentation,
+	ToolPresentationFactory,
+	ToolPresentationRenderers,
+	ToolPresentationTarget,
 	UserBashEventResult,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
@@ -108,6 +111,7 @@ import {
 	resolveModelScopeFromModels,
 } from "../../core/model-resolver.ts";
 import { CredentialSynchronizationError } from "../../core/model-runtime.ts";
+import { NestedCallRecorder } from "../../core/nested-tool-calls.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { RADIUS_MCP_URL, RADIUS_PROVIDER_ID } from "../../core/radius.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
@@ -597,6 +601,11 @@ export class InteractiveMode {
 	private messageEntryAssociations = new Map<string, MessageEntryAssociation>();
 	private statusFilters = new Map<string, (message: string) => boolean>();
 	private toolImagePresentations = new Map<string, ToolImagePresentation>();
+	private toolPresentationFactories = new Map<string, ToolPresentationFactory>();
+	private nestedCallRecorders = new Map<string, NestedCallRecorder>();
+	private nestedToolCallRoots = new Map<string, string>();
+	private nestedToolCallRecords = new Map<string, NestedToolCallRecord>();
+	private nestedCallIdsByRoot = new Map<string, Set<string>>();
 	private readonly toolGroupCoordinator = new ToolGroupCoordinator();
 	private streamingAssistantVisible = false;
 	private queuedMessagePresentation: QueuedMessagePresentationFactory | undefined;
@@ -2227,7 +2236,31 @@ export class InteractiveMode {
 	 * whatever this returns, so they never reach into the tool registry themselves.
 	 */
 	private getRegisteredToolDefinition(toolName: string) {
-		return withBuiltInRenderers(toolName, this.session.getToolDefinition(toolName));
+		const definition = this.session.getToolDefinition(toolName);
+		const base = withBuiltInRenderers(toolName, definition);
+		let renderers: ToolPresentationRenderers = {
+			...(definition?.renderShell ? { renderShell: definition.renderShell } : {}),
+			...(base?.renderCall ? { renderCall: base.renderCall } : {}),
+			...(base?.renderResult ? { renderResult: base.renderResult } : {}),
+		};
+		const target: Omit<ToolPresentationTarget, "renderers"> = {
+			name: toolName,
+			...(definition?.label ? { label: definition.label } : {}),
+		};
+		let hasPresentation = false;
+		for (const factory of this.toolPresentationFactories.values()) {
+			try {
+				const next = factory({ ...target, renderers });
+				if (next !== undefined) {
+					renderers = next;
+					hasPresentation = true;
+				}
+			} catch {
+				// A presentation extension must not prevent the native tool row from rendering.
+			}
+		}
+		if (!base && !hasPresentation) return undefined;
+		return renderers;
 	}
 
 	private getMarkdownTransformers(): MarkdownTransformer[] {
@@ -2464,6 +2497,8 @@ export class InteractiveMode {
 		this.messageEntryAssociations.clear();
 		this.statusFilters.clear();
 		this.toolImagePresentations.clear();
+		this.toolPresentationFactories.clear();
+		this.clearNestedToolPresentationState();
 		this.setToolGroupPresentation(undefined);
 		this.setExtensionFooter(undefined);
 		this.setExtensionHeader(undefined);
@@ -2664,14 +2699,117 @@ export class InteractiveMode {
 	private setToolImagePresentation(toolName: string, presentation: ToolImagePresentation | undefined): void {
 		if (presentation) this.toolImagePresentations.set(toolName, presentation);
 		else this.toolImagePresentations.delete(toolName);
-		for (const component of this.pendingTools.values()) {
-			if (component.getToolName() === toolName) component.setImagePresentation(presentation);
-		}
-		for (const child of this.chatContainer.children) {
-			if (child instanceof ToolExecutionComponent && child.getToolName() === toolName) {
-				child.setImagePresentation(presentation);
+		for (const component of this.getToolExecutionComponents()) {
+			if (toolName === "*" || component.getToolName() === toolName) {
+				component.setImagePresentation(this.resolveToolImagePresentation(component.getToolName()));
 			}
 		}
+	}
+
+	private resolveToolImagePresentation(toolName: string): ToolImagePresentation | undefined {
+		return this.toolImagePresentations.get(toolName) ?? this.toolImagePresentations.get("*");
+	}
+
+	private setToolPresentation(key: string, factory: ToolPresentationFactory | undefined): void {
+		if (factory) this.toolPresentationFactories.set(key, factory);
+		else this.toolPresentationFactories.delete(key);
+		for (const component of this.getToolExecutionComponents()) {
+			component.setToolRenderers(this.getRegisteredToolDefinition(component.getToolName()));
+		}
+	}
+
+	private getToolExecutionComponents(): Set<ToolExecutionComponent> {
+		const components = new Set(this.pendingTools.values());
+		for (const child of this.chatContainer.children) {
+			if (child instanceof ToolExecutionComponent) components.add(child);
+		}
+		return components;
+	}
+
+	private resolveNestedToolRootId(parentToolCallId: string): string | undefined {
+		const mapped = this.nestedToolCallRoots.get(parentToolCallId);
+		if (mapped) return mapped;
+		if (this.pendingTools.has(parentToolCallId) || this.nestedCallRecorders.has(parentToolCallId)) {
+			return parentToolCallId;
+		}
+		let candidate = parentToolCallId;
+		while (candidate.includes("/")) {
+			candidate = candidate.slice(0, candidate.lastIndexOf("/"));
+			if (this.pendingTools.has(candidate) || this.nestedCallRecorders.has(candidate)) return candidate;
+		}
+		return undefined;
+	}
+
+	private recordNestedToolCallStart(event: Extract<AgentSessionEvent, { type: "tool_execution_start" }>): void {
+		const parentToolCallId = event.parentToolCallId;
+		if (!parentToolCallId) return;
+		const rootToolCallId = this.resolveNestedToolRootId(parentToolCallId);
+		if (!rootToolCallId) return;
+		let recorder = this.nestedCallRecorders.get(rootToolCallId);
+		if (!recorder) {
+			recorder = new NestedCallRecorder();
+			this.nestedCallRecorders.set(rootToolCallId, recorder);
+		}
+		const record = recorder.start({
+			type: "toolCall",
+			id: event.toolCallId,
+			name: event.toolName,
+			arguments: event.args as AgentToolCall["arguments"],
+		});
+		if (record) {
+			this.nestedToolCallRoots.set(event.toolCallId, rootToolCallId);
+			this.nestedToolCallRecords.set(event.toolCallId, record);
+			let callIds = this.nestedCallIdsByRoot.get(rootToolCallId);
+			if (!callIds) {
+				callIds = new Set();
+				this.nestedCallIdsByRoot.set(rootToolCallId, callIds);
+			}
+			callIds.add(event.toolCallId);
+		}
+		this.updateNestedToolPresentation(rootToolCallId);
+	}
+
+	private recordNestedToolCallEnd(event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>): void {
+		const rootToolCallId = this.nestedToolCallRoots.get(event.toolCallId);
+		if (!rootToolCallId) return;
+		const record = this.nestedToolCallRecords.get(event.toolCallId);
+		const recorder = this.nestedCallRecorders.get(rootToolCallId);
+		const resultContent = event.result.content as Array<{ type: string; text?: string }>;
+		const errorText = resultContent
+			.filter((block) => block.type === "text")
+			.map((block) => block.text ?? "")
+			.join("\n");
+		recorder?.finish(record, event.isError, errorText);
+		this.nestedToolCallRoots.delete(event.toolCallId);
+		this.nestedToolCallRecords.delete(event.toolCallId);
+		const callIds = this.nestedCallIdsByRoot.get(rootToolCallId);
+		callIds?.delete(event.toolCallId);
+		if (callIds?.size === 0) this.nestedCallIdsByRoot.delete(rootToolCallId);
+		this.updateNestedToolPresentation(rootToolCallId);
+	}
+
+	private updateNestedToolPresentation(rootToolCallId: string): void {
+		this.pendingTools.get(rootToolCallId)?.setNestedCalls(this.nestedCallRecorders.get(rootToolCallId)?.snapshot());
+	}
+
+	private setFinalNestedToolPresentation(toolCallId: string, nestedCalls: NestedToolCalls | undefined): void {
+		const recorder = this.nestedCallRecorders.get(toolCallId);
+		if (!nestedCalls && !recorder) return;
+		this.pendingTools.get(toolCallId)?.setNestedCalls(nestedCalls ?? recorder?.snapshot());
+		this.pendingTools.delete(toolCallId);
+		this.nestedCallRecorders.delete(toolCallId);
+		for (const nestedToolCallId of this.nestedCallIdsByRoot.get(toolCallId) ?? []) {
+			this.nestedToolCallRoots.delete(nestedToolCallId);
+			this.nestedToolCallRecords.delete(nestedToolCallId);
+		}
+		this.nestedCallIdsByRoot.delete(toolCallId);
+	}
+
+	private clearNestedToolPresentationState(): void {
+		this.nestedCallRecorders.clear();
+		this.nestedToolCallRoots.clear();
+		this.nestedToolCallRecords.clear();
+		this.nestedCallIdsByRoot.clear();
 	}
 
 	private setToolGroupPresentation(presentation: ToolGroupPresentation | undefined): void {
@@ -2774,6 +2912,7 @@ export class InteractiveMode {
 				this.setMessageEntryAssociation(customType, association),
 			setStatusFilter: (key, filter) => this.setStatusFilter(key, filter),
 			setToolImagePresentation: (toolName, presentation) => this.setToolImagePresentation(toolName, presentation),
+			setToolPresentation: (key, factory) => this.setToolPresentation(key, factory),
 			setToolGroupPresentation: (presentation) => this.setToolGroupPresentation(presentation),
 			setQueuedMessagePresentation: (factory) => this.setQueuedMessagePresentation(factory),
 		};
@@ -3603,6 +3742,8 @@ export class InteractiveMode {
 					this.attachMessagePresentations(this.streamingComponent);
 					this.chatContainer.addChild(this.streamingComponent);
 					this.ui.requestRender();
+				} else if (event.message.role === "toolResult") {
+					this.setFinalNestedToolPresentation(event.message.toolCallId, event.message.nestedCalls);
 				}
 				break;
 
@@ -3627,7 +3768,7 @@ export class InteractiveMode {
 								{
 									showImages: this.settingsManager.getShowImages(),
 									imageWidthCells: this.settingsManager.getImageWidthCells(),
-									imagePresentation: this.toolImagePresentations?.get(item.name),
+									imagePresentation: this.resolveToolImagePresentation(item.name),
 									groupCoordinator: this.toolGroupCoordinator,
 								},
 								this.getRegisteredToolDefinition(item.name),
@@ -3693,7 +3834,10 @@ export class InteractiveMode {
 
 			case "tool_execution_start": {
 				// Nested calls (from codemode scripts) are shown inside their parent's row.
-				if (event.parentToolCallId) break;
+				if (event.parentToolCallId) {
+					this.recordNestedToolCallStart(event);
+					break;
+				}
 				let component = this.pendingTools.get(event.toolCallId);
 				if (!component) {
 					component = new ToolExecutionComponent(
@@ -3703,7 +3847,7 @@ export class InteractiveMode {
 						{
 							showImages: this.settingsManager.getShowImages(),
 							imageWidthCells: this.settingsManager.getImageWidthCells(),
-							imagePresentation: this.toolImagePresentations?.get(event.toolName),
+							imagePresentation: this.resolveToolImagePresentation(event.toolName),
 							groupCoordinator: this.toolGroupCoordinator,
 						},
 						this.getRegisteredToolDefinition(event.toolName),
@@ -3729,10 +3873,14 @@ export class InteractiveMode {
 			}
 
 			case "tool_execution_end": {
+				if (event.parentToolCallId) {
+					this.recordNestedToolCallEnd(event);
+					break;
+				}
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError }, false, Date.now());
-					this.pendingTools.delete(event.toolCallId);
+					if (!this.nestedCallRecorders.has(event.toolCallId)) this.pendingTools.delete(event.toolCallId);
 					this.ui.requestRender();
 				}
 				break;
@@ -3749,6 +3897,7 @@ export class InteractiveMode {
 					this.streamingMessage = undefined;
 				}
 				this.pendingTools.clear();
+				this.clearNestedToolPresentationState();
 
 				this.ui.requestRender();
 				break;
@@ -4140,7 +4289,7 @@ export class InteractiveMode {
 							{
 								showImages: this.settingsManager.getShowImages(),
 								imageWidthCells: this.settingsManager.getImageWidthCells(),
-								imagePresentation: this.toolImagePresentations?.get(content.name),
+								imagePresentation: this.resolveToolImagePresentation(content.name),
 								groupCoordinator: this.toolGroupCoordinator,
 							},
 							this.getRegisteredToolDefinition(content.name),

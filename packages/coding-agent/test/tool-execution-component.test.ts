@@ -1,4 +1,5 @@
 import { join, resolve } from "node:path";
+import type { NestedToolCalls } from "@earendil-works/pi-ai";
 import {
 	getCapabilities,
 	resetCapabilitiesCache,
@@ -15,7 +16,7 @@ const imageConvertMocks = vi.hoisted(() => ({ convertToPng: vi.fn() }));
 vi.mock("../src/utils/image-convert.ts", () => imageConvertMocks);
 
 import { getReadmePath } from "../src/config.ts";
-import type { ToolDefinition, ToolGroupMemberRenderContext } from "../src/core/extensions/types.ts";
+import type { ToolDefinition, ToolGroupMemberRenderContext, ToolRenderContext } from "../src/core/extensions/types.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
 import { withBuiltInRenderers } from "../src/core/tools/renderers/index.ts";
@@ -133,6 +134,69 @@ describe("ToolExecutionComponent parity", () => {
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("custom call");
 		expect(rendered).toContain("custom result");
+	});
+
+	test("passes bounded nested calls to live and replayed renderers and preserves row state on rebind", () => {
+		const nestedCalls = {
+			calls: [
+				{
+					id: "tool-live/1",
+					name: "read",
+					arguments: { path: "src/main.ts" },
+					status: "unfinished",
+				},
+			],
+			complete: false,
+		} satisfies NestedToolCalls;
+		let initialContext: ToolRenderContext | undefined;
+		let resultContext: ToolRenderContext | undefined;
+		let reboundContext: ToolRenderContext | undefined;
+		const definition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: (_args, _theme, context) => {
+				initialContext = context;
+				context.state.retained = "renderer state";
+				return new Text("native call", 0, 0);
+			},
+			renderResult: (_result, _options, _theme, context) => {
+				resultContext = context;
+				return new Text("native result", 0, 0);
+			},
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-live",
+			{},
+			{},
+			definition,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		component.setNestedCalls(nestedCalls);
+		expect(initialContext?.nestedCalls).toEqual(nestedCalls);
+		component.updateResult({
+			content: [{ type: "text", text: "done" }],
+			details: {},
+			nestedCalls,
+			isError: false,
+		});
+		expect(resultContext?.nestedCalls).toEqual(nestedCalls);
+		component.setExpanded(true);
+		const rendererState = initialContext?.state;
+
+		component.setToolRenderers({
+			renderShell: "self",
+			renderCall: (_args, _theme, context) => {
+				reboundContext = context;
+				return new Text("Custom call", 0, 0);
+			},
+		});
+
+		expect(component.getGroupExpanded()).toBe(true);
+		expect(reboundContext?.state).toBe(rendererState);
+		expect(reboundContext?.nestedCalls).toEqual(nestedCalls);
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("Custom call");
 	});
 
 	test("self-rendered empty tool rows take no layout space", () => {

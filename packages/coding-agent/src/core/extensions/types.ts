@@ -29,6 +29,7 @@ import type {
 	JsonValue,
 	Message,
 	Model,
+	NestedToolCalls,
 	OAuthCredentials,
 	OAuthLoginCallbacks,
 	Provider,
@@ -534,8 +535,14 @@ export interface ExtensionUIContext {
 	/** Filter status rows before they are added to the transcript. Return false to suppress a row. */
 	setStatusFilter?: (key: string, filter: ((message: string) => boolean) | undefined) => void;
 
-	/** Configure image row presentation for all executions of a tool name. */
+	/** Configure image rows for a tool name; `"*"` is the fallback for names without an exact setting. */
 	setToolImagePresentation?: (toolName: string, presentation: ToolImagePresentation | undefined) => void;
+	/**
+	 * Decorate tool renderers without replacing tool registration or execution. Factories are keyed
+	 * for replacement/removal and receive each currently resolved tool row, including built-ins and
+	 * tools registered dynamically after session start. Use `"*"` in the factory to match names.
+	 */
+	setToolPresentation?: (key: string, factory: ToolPresentationFactory | undefined) => void;
 	/** Group consecutive native tool executions in the interactive transcript. */
 	setToolGroupPresentation?: (presentation: ToolGroupPresentation | undefined) => void;
 
@@ -735,6 +742,8 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 	hasRenderedImages: boolean;
 	/** Whether the current result is an error. */
 	isError: boolean;
+	/** Bounded native record of nested calls made by this tool execution, when available. */
+	nestedCalls?: NestedToolCalls;
 	/** Position of this tool call in an active transcript group, when configured. */
 	group?: ToolGroupMemberRenderContext;
 }
@@ -891,6 +900,22 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		context: ToolRenderContext<TState, Static<TParams>>,
 	) => Component;
 }
+
+/** Renderer-only portion of a tool definition, without its execution or registration contract. */
+export type ToolPresentationRenderers = Pick<
+	ToolDefinition<any, any, any>,
+	"renderShell" | "renderCall" | "renderResult"
+>;
+
+/** Current native renderers and display label for a tool row. */
+export interface ToolPresentationTarget {
+	readonly name: string;
+	readonly label?: string;
+	readonly renderers: ToolPresentationRenderers;
+}
+
+/** Return a renderer pair to replace the current renderers, or undefined to leave them unchanged. */
+export type ToolPresentationFactory = (target: ToolPresentationTarget) => ToolPresentationRenderers | undefined;
 
 type AnyToolDefinition = ToolDefinition<any, any, any>;
 
