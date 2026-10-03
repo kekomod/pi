@@ -95,6 +95,20 @@ describe("UserMessageComponent", () => {
 		expect(rendered).toContain("display preview");
 	});
 
+	test("omits an empty native row when a leading component replaces its display text", () => {
+		initTheme("dark");
+		const component = new UserMessageComponent("stored message");
+		component.setDisplayText(() => "");
+		component.addLeadingComponent(() => new Text("replacement row", 0, 0));
+
+		const lines = component.render(40);
+
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain(OSC133_ZONE_START);
+		expect(stripAnsi(lines.join("\n"))).toContain("replacement row");
+		expect(lines[0]).toContain(OSC133_ZONE_END + OSC133_ZONE_FINAL);
+	});
+
 	test("passes terminal width to display resolvers and rebuilds native text by width", () => {
 		initTheme("dark");
 		const widths: number[] = [];

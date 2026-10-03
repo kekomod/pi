@@ -166,9 +166,11 @@ export class UserMessageComponent extends Container implements UserMessagePresen
 				// Keep native message content when an optional leading component fails.
 			}
 		}
+		const hasLeadingReplacement = this.children.length > 0;
 		const displayText = resolvedText ?? (width === undefined ? this.text : this.resolveDisplayText(width));
 		this.builtDisplayText = displayText;
 		this.builtDisplayWidth = width;
+		if (this.displayTextResolver && displayText.length === 0 && hasLeadingReplacement) return;
 		const presentation = resolveMessageRegionPresentation(this.regionRenderers, {
 			role: this.role,
 			region: "text",
