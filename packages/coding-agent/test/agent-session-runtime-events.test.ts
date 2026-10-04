@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -26,6 +26,11 @@ type RecordedSessionEvent =
 	| SessionShutdownEvent
 	| SessionStartEvent;
 
+function expectSessionFileInDirectory(sessionFile: string | undefined, sessionDir: string): void {
+	expect(sessionFile).toBeTruthy();
+	expect(dirname(resolve(sessionFile!))).toBe(resolve(sessionDir));
+}
+
 describe("AgentSessionRuntime session lifecycle events", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -37,6 +42,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 	async function createRuntimeHost(extensionFactory: ExtensionFactory) {
 		const tempDir = join(tmpdir(), `pi-runtime-events-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(tempDir, { recursive: true });
 
 		const faux = registerFauxProvider();
@@ -97,7 +103,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const runtimeHost = await createAgentSessionRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.create(tempDir),
+			sessionManager: SessionManager.create(tempDir, sessionDir),
 		});
 		await runtimeHost.session.bindExtensions({});
 
@@ -109,12 +115,12 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			}
 		});
 
-		return { runtimeHost, faux };
+		return { runtimeHost, faux, sessionDir };
 	}
 
 	it("emits session_before_switch and session_start for new and resume flows", async () => {
 		const events: RecordedSessionEvent[] = [];
-		const { runtimeHost } = await createRuntimeHost((pi) => {
+		const { runtimeHost, sessionDir } = await createRuntimeHost((pi) => {
 			pi.on("session_before_switch", (event) => {
 				events.push(event);
 			});
@@ -131,12 +137,13 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		await runtimeHost.session.prompt("hello");
 		const originalSessionFile = runtimeHost.session.sessionFile;
-		expect(originalSessionFile).toBeTruthy();
+		expectSessionFileInDirectory(originalSessionFile, sessionDir);
 
 		const newSessionResult = await runtimeHost.newSession();
 		expect(newSessionResult.cancelled).toBe(false);
 		await runtimeHost.session.bindExtensions({});
 		const secondSessionFile = runtimeHost.session.sessionFile;
+		expectSessionFileInDirectory(secondSessionFile, sessionDir);
 		expect(events).toEqual([
 			{ type: "session_before_switch", reason: "new", targetSessionFile: undefined },
 			{ type: "session_shutdown", reason: "new", targetSessionFile: secondSessionFile },
@@ -149,6 +156,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const switchResult = await runtimeHost.switchSession(originalSessionFile!);
 		expect(switchResult.cancelled).toBe(false);
 		await runtimeHost.session.bindExtensions({});
+		expectSessionFileInDirectory(runtimeHost.session.sessionFile, sessionDir);
 		expect(events).toEqual([
 			{ type: "session_before_switch", reason: "resume", targetSessionFile: originalSessionFile },
 			{ type: "session_shutdown", reason: "resume", targetSessionFile: originalSessionFile },
@@ -209,7 +217,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 	it("emits session_before_fork and session_start and honors cancellation", async () => {
 		const events: RecordedSessionEvent[] = [];
 		let cancelNextFork = false;
-		const { runtimeHost } = await createRuntimeHost((pi) => {
+		const { runtimeHost, sessionDir } = await createRuntimeHost((pi) => {
 			pi.on("session_before_fork", (event) => {
 				events.push(event);
 				if (cancelNextFork) {
@@ -235,6 +243,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const successResult = await runtimeHost.fork(userMessage.entryId);
 		expect(successResult.cancelled).toBe(false);
 		expect(successResult.selectedText).toBe("hello");
+		expectSessionFileInDirectory(runtimeHost.session.sessionFile, sessionDir);
 		await runtimeHost.session.bindExtensions({});
 		expect(events).toEqual([
 			{ type: "session_before_fork", entryId: userMessage.entryId, position: "before" },
