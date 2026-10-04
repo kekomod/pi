@@ -573,9 +573,11 @@ export interface AssistantMessage {
 export interface NestedToolCallRecord {
 	id: string;
 	name: string;
-	/** Omitted when over the size limits; `argumentsBytes` then gives their size. */
+	/** Bounded display label from the tool definition; retained for nested-call replay. */
+	label?: string;
+	/** Omitted when over the size limits or when bounded preflight cannot safely measure them. */
 	arguments?: JsonObject;
-	/** UTF-8 size of the arguments as JSON, set when `arguments` is omitted. */
+	/** UTF-8 size of the arguments as JSON when bounded preflight can determine it. */
 	argumentsBytes?: number;
 	/** `unfinished`: the call was still running when the calling tool finished. */
 	status: "ok" | "error" | "unfinished";

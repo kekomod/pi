@@ -111,7 +111,7 @@ import {
 	resolveModelScopeFromModels,
 } from "../../core/model-resolver.ts";
 import { CredentialSynchronizationError } from "../../core/model-runtime.ts";
-import { NestedCallRecorder } from "../../core/nested-tool-calls.ts";
+import { boundedNestedToolErrorText, NestedCallRecorder } from "../../core/nested-tool-calls.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { RADIUS_MCP_URL, RADIUS_PROVIDER_ID } from "../../core/radius.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
@@ -2248,7 +2248,7 @@ export class InteractiveMode {
 			...(definition?.label ? { label: definition.label } : {}),
 		};
 		let hasPresentation = false;
-		for (const factory of this.toolPresentationFactories.values()) {
+		const applyFactory = (factory: ToolPresentationFactory): void => {
 			try {
 				const next = factory({ ...target, renderers });
 				if (next !== undefined) {
@@ -2258,6 +2258,12 @@ export class InteractiveMode {
 			} catch {
 				// A presentation extension must not prevent the native tool row from rendering.
 			}
+		};
+		for (const factory of this.session.extensionRunner.getToolPresentations().values()) {
+			applyFactory(factory);
+		}
+		for (const factory of this.toolPresentationFactories.values()) {
+			applyFactory(factory);
 		}
 		if (!base && !hasPresentation) return undefined;
 		return renderers;
@@ -2750,12 +2756,15 @@ export class InteractiveMode {
 			recorder = new NestedCallRecorder();
 			this.nestedCallRecorders.set(rootToolCallId, recorder);
 		}
-		const record = recorder.start({
-			type: "toolCall",
-			id: event.toolCallId,
-			name: event.toolName,
-			arguments: event.args as AgentToolCall["arguments"],
-		});
+		const record = recorder.start(
+			{
+				type: "toolCall",
+				id: event.toolCallId,
+				name: event.toolName,
+				arguments: event.args as AgentToolCall["arguments"],
+			},
+			this.session.getToolDefinition(event.toolName)?.label,
+		);
 		if (record) {
 			this.nestedToolCallRoots.set(event.toolCallId, rootToolCallId);
 			this.nestedToolCallRecords.set(event.toolCallId, record);
@@ -2774,12 +2783,7 @@ export class InteractiveMode {
 		if (!rootToolCallId) return;
 		const record = this.nestedToolCallRecords.get(event.toolCallId);
 		const recorder = this.nestedCallRecorders.get(rootToolCallId);
-		const resultContent = event.result.content as Array<{ type: string; text?: string }>;
-		const errorText = resultContent
-			.filter((block) => block.type === "text")
-			.map((block) => block.text ?? "")
-			.join("\n");
-		recorder?.finish(record, event.isError, errorText);
+		recorder?.finish(record, event.isError, event.isError ? boundedNestedToolErrorText(event.result) : "");
 		this.nestedToolCallRoots.delete(event.toolCallId);
 		this.nestedToolCallRecords.delete(event.toolCallId);
 		const callIds = this.nestedCallIdsByRoot.get(rootToolCallId);

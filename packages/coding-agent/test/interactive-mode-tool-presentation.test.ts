@@ -2,6 +2,7 @@ import type { NestedToolCalls } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
 import type { ToolImagePresentation, ToolPresentationFactory } from "../src/core/extensions/types.ts";
+import { NESTED_CALL_LIMITS } from "../src/core/nested-tool-calls.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -34,7 +35,10 @@ describe("InteractiveMode tool presentation", () => {
 			toolPresentationFactories: new Map(),
 			pendingTools: new Map(),
 			chatContainer: { children: [builtin, dynamic] },
-			session: { getToolDefinition: () => undefined },
+			session: {
+				getToolDefinition: () => undefined,
+				extensionRunner: { getToolPresentations: () => new Map() },
+			},
 			getToolExecutionComponents: prototype.getToolExecutionComponents,
 			getRegisteredToolDefinition: prototype.getRegisteredToolDefinition,
 		};
@@ -46,6 +50,34 @@ describe("InteractiveMode tool presentation", () => {
 		expect(stripAnsi(builtin.render(80).join("\n"))).toContain("Custom read");
 		expect(stripAnsi(dynamic.render(80).join("\n"))).toContain("Custom mcp__docs__lookup");
 		expect(builtin.getGroupExpanded()).toBe(true);
+	});
+
+	test("applies declared factories before dynamic factories and reads the current runner after replacement", () => {
+		const prototype = InteractiveMode.prototype as any;
+		const factory =
+			(label: string): ToolPresentationFactory =>
+			() => ({
+				renderCall: () => new Text(label, 0, 0),
+			});
+		const readRenderer = (mode: any) =>
+			mode.getRegisteredToolDefinition("late_mcp_tool")?.renderCall?.({}, initTheme("dark"), {});
+		const mode = {
+			toolPresentationFactories: new Map([["shared", factory("dynamic")]]),
+			session: {
+				getToolDefinition: () => undefined,
+				extensionRunner: { getToolPresentations: () => new Map([["shared", factory("declared")]]) },
+			},
+			getRegisteredToolDefinition: prototype.getRegisteredToolDefinition,
+		};
+
+		expect(readRenderer(mode)?.render(80).join("\n")).toContain("dynamic");
+		mode.toolPresentationFactories.clear();
+		mode.session.extensionRunner = {
+			getToolPresentations: () => new Map([["shared", factory("replacement")]]),
+		};
+		expect(readRenderer(mode)?.render(80).join("\n")).toContain("replacement");
+		mode.session.extensionRunner = { getToolPresentations: () => new Map() };
+		expect(mode.getRegisteredToolDefinition("late_mcp_tool")).toBeUndefined();
 	});
 
 	test("uses wildcard image presentation as a fallback with exact-name precedence", () => {
@@ -97,6 +129,9 @@ describe("InteractiveMode tool presentation", () => {
 			nestedCallIdsByRoot: new Map(),
 			pendingTools: new Map([["parent-1", parent]]),
 			chatContainer: { children: [parent] },
+			session: {
+				getToolDefinition: (name: string) => (name === "read" ? { label: "Fixture · read [h7]" } : undefined),
+			},
 			resolveNestedToolRootId: prototype.resolveNestedToolRootId,
 			updateNestedToolPresentation: prototype.updateNestedToolPresentation,
 		};
@@ -110,20 +145,71 @@ describe("InteractiveMode tool presentation", () => {
 		});
 		expect(visibleSnapshot?.calls[0]).toMatchObject({
 			name: "read",
+			label: "Fixture · read [h7]",
 			arguments: structuredArgs,
 			status: "unfinished",
 		});
 		expect(visibleSnapshot?.complete).toBe(false);
 
+		let successfulTextReads = 0;
 		prototype.recordNestedToolCallEnd.call(fakeMode, {
 			toolCallId: "parent-1/1",
 			toolName: "read",
 			parentToolCallId: "parent-1",
-			result: { content: [{ type: "text", text: "private file contents" }] },
+			result: {
+				content: [
+					{
+						type: "text",
+						get text() {
+							successfulTextReads++;
+							return "private file contents";
+						},
+					},
+				],
+			},
 			isError: false,
 		});
+		expect(successfulTextReads).toBe(0);
 		expect(visibleSnapshot?.calls[0]?.status).toBe("ok");
 		expect(JSON.stringify(visibleSnapshot)).not.toContain("private file contents");
+
+		const errorText = "x".repeat(100_000);
+		const errorBlocks = Array.from({ length: 10_000 }, (_, index) => ({
+			type: "text",
+			text: index === 63 ? errorText : "",
+		}));
+		let inspectedErrorBlocks = 0;
+		const boundedErrorBlocks = new Proxy(errorBlocks, {
+			get(target, property, receiver) {
+				if (typeof property === "string" && /^\d+$/u.test(property)) {
+					const index = Number(property);
+					expect(index).toBeLessThan(NESTED_CALL_LIMITS.maxErrorBlocks);
+					inspectedErrorBlocks++;
+				}
+				return Reflect.get(target, property, receiver);
+			},
+		});
+		prototype.recordNestedToolCallStart.call(fakeMode, {
+			toolCallId: "parent-1/2",
+			toolName: "fetch_content",
+			args: { url: "https://example.test/large-error" },
+			parentToolCallId: "parent-1",
+		});
+		prototype.recordNestedToolCallEnd.call(fakeMode, {
+			toolCallId: "parent-1/2",
+			toolName: "fetch_content",
+			parentToolCallId: "parent-1",
+			result: { content: boundedErrorBlocks },
+			isError: true,
+		});
+		expect(inspectedErrorBlocks).toBe(NESTED_CALL_LIMITS.maxErrorBlocks);
+		expect(visibleSnapshot?.calls[1]?.status).toBe("error");
+		expect(visibleSnapshot?.calls[1]?.error).toHaveLength(NESTED_CALL_LIMITS.maxErrorChars);
+		expect(
+			visibleSnapshot?.calls[1]?.error?.endsWith(
+				"x".repeat(NESTED_CALL_LIMITS.maxErrorChars - NESTED_CALL_LIMITS.maxErrorBlocks + 1),
+			),
+		).toBe(true);
 
 		const replayedSnapshot = { calls: visibleSnapshot?.calls ?? [], complete: true } satisfies NestedToolCalls;
 		prototype.setFinalNestedToolPresentation.call(fakeMode, "parent-1", replayedSnapshot);
@@ -156,6 +242,7 @@ describe("InteractiveMode tool presentation", () => {
 			nestedCallIdsByRoot: new Map(),
 			pendingTools: new Map([["parent-bounded", parent]]),
 			chatContainer: { children: [parent] },
+			session: { getToolDefinition: () => undefined },
 			resolveNestedToolRootId: prototype.resolveNestedToolRootId,
 			updateNestedToolPresentation: prototype.updateNestedToolPresentation,
 		};

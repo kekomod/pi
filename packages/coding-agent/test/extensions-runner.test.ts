@@ -739,6 +739,27 @@ describe("ExtensionRunner", () => {
 			expect(missing).toBeUndefined();
 		});
 
+		it("exposes declarative tool presentations before session startup", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.registerToolPresentation("codemode", () => ({ renderShell: "default" }));
+					pi.registerToolPresentation("codemode", () => ({ renderCall: () => null }));
+					pi.registerToolPresentation("*", () => ({ renderShell: "self" }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-presentation.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const presentations = runner.getToolPresentations();
+
+			expect([...presentations.keys()]).toEqual(["codemode", "*"]);
+			expect(presentations.get("codemode")?.({ name: "codemode", renderers: {} })).toMatchObject({
+				renderCall: expect.any(Function),
+			});
+			expect(presentations.get("*")?.({ name: "unknown", renderers: {} })).toEqual({ renderShell: "self" });
+		});
+
 		it("gets entry renderer by type", async () => {
 			const extCode = `
 				export default function(pi) {

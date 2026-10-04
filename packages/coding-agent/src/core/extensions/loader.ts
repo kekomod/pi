@@ -34,6 +34,7 @@ import type {
 	ProviderConfig,
 	RegisteredCommand,
 	ToolDefinition,
+	ToolPresentationFactory,
 } from "./types.ts";
 
 const require = createRequire(import.meta.url);
@@ -367,6 +368,11 @@ function createExtensionAPI(
 			extension.messageRenderers.set(customType, renderer as MessageRenderer);
 		},
 
+		registerToolPresentation(key: string, factory: ToolPresentationFactory): void {
+			assertActive();
+			extension.toolPresentations.set(key, factory);
+		},
+
 		registerMarkdownTransformer(transformer: MarkdownTransformer): void {
 			assertActive();
 			extension.markdownTransformer = transformer;
@@ -652,6 +658,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		handlers: new Map(),
 		tools: new Map(),
 		messageRenderers: new Map(),
+		toolPresentations: new Map(),
 		entryRenderers: new Map(),
 		commands: new Map(),
 		flags: new Map(),

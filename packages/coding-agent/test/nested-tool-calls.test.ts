@@ -52,14 +52,26 @@ function createRunner(tools: AgentTool[], options: { sequential?: boolean } = {}
 
 describe("NestedToolCallRunner", () => {
 	it("assigns ids below the caller, emits events with the parent id, and records the calls", async () => {
+		let successfulTextReads = 0;
 		const echo: AgentTool = {
 			name: "echo",
-			label: "Echo",
+			label: "Echo · $a/b [hash-17]",
 			description: "Echo",
 			parameters: Type.Object({}),
 			async execute(_id, _params, _signal, onUpdate) {
 				onUpdate?.({ content: [{ type: "text", text: "partial" }], details: {} });
-				return { content: [{ type: "text", text: "ok" }], details: {} };
+				return {
+					content: [
+						{
+							type: "text",
+							get text() {
+								successfulTextReads++;
+								return "ok";
+							},
+						},
+					],
+					details: {},
+				};
 			},
 		};
 		const { runner, events } = createRunner([echo]);
@@ -70,6 +82,7 @@ describe("NestedToolCallRunner", () => {
 
 		expect(first.toolCall.id).toBe("call/1");
 		expect(missing).toMatchObject({ toolCall: { id: "call/2" }, isError: true });
+		expect(successfulTextReads).toBe(0);
 		expect(updates).toHaveLength(1);
 		expect(events.map((event) => [event.type, event.toolCallId, event.parentToolCallId])).toEqual([
 			["tool_execution_start", "call/1", "call"],
@@ -80,7 +93,14 @@ describe("NestedToolCallRunner", () => {
 		]);
 		expect(runner.takeRecord("call")?.calls).toEqual({
 			calls: [
-				{ id: "call/1", name: "echo", arguments: { a: 1 }, status: "ok", durationMs: expect.any(Number) },
+				{
+					id: "call/1",
+					name: "echo",
+					label: "Echo · $a/b [hash-17]",
+					arguments: { a: 1 },
+					status: "ok",
+					durationMs: expect.any(Number),
+				},
 				{
 					id: "call/2",
 					name: "missing",
@@ -211,7 +231,10 @@ describe("NestedCallRecorder", () => {
 		expect(snapshot?.complete).toBe(false);
 		expect(snapshot?.calls[1]).toMatchObject({ id: "b", status: "error" });
 		expect(snapshot?.calls[1].arguments).toBeUndefined();
-		expect(snapshot?.calls[1].argumentsBytes).toBeGreaterThan(NESTED_CALL_LIMITS.maxArgumentBytesPerCall);
+		expect(snapshot?.calls[1].argumentsBytes).toBe(
+			new TextEncoder().encode(JSON.stringify({ text: "x".repeat(NESTED_CALL_LIMITS.maxArgumentBytesPerCall) }))
+				.length,
+		);
 		expect(snapshot?.calls[1].error).toHaveLength(NESTED_CALL_LIMITS.maxErrorChars);
 
 		for (let i = 0; i < NESTED_CALL_LIMITS.maxCalls; i++)
@@ -229,5 +252,54 @@ describe("NestedCallRecorder", () => {
 		expect(snapshot?.calls.every((entry) => entry.status === "unfinished")).toBe(true);
 		expect(snapshot?.complete).toBe(false);
 		expect(records).toHaveLength(6);
+	});
+
+	it("bounds invalid and very large arguments without interrupting execution", () => {
+		const recorder = new NestedCallRecorder();
+		const cyclic: Record<string, unknown> = {};
+		cyclic.self = cyclic;
+		expect(() => recorder.start(call("cycle", cyclic as AgentToolCall["arguments"]))).not.toThrow();
+		expect(() =>
+			recorder.start(call("bigint", { value: 1n } as unknown as AgentToolCall["arguments"])),
+		).not.toThrow();
+		expect(() =>
+			recorder.start(call("large", { value: "x".repeat(1_000_000) } as AgentToolCall["arguments"])),
+		).not.toThrow();
+
+		const snapshot = recorder.snapshot();
+		expect(snapshot?.complete).toBe(false);
+		expect(snapshot?.calls).toHaveLength(3);
+		expect(
+			snapshot?.calls.every((entry) => entry.arguments === undefined && entry.argumentsBytes === undefined),
+		).toBe(true);
+	});
+
+	it("keeps native JSON behavior for bounded objects and arrays", () => {
+		const recorder = new NestedCallRecorder();
+		const args = {
+			text: "λ",
+			omitted: undefined,
+			items: [undefined, { omitted: undefined }, 2],
+		} as unknown as AgentToolCall["arguments"];
+		const record = recorder.start(call("json", args));
+		recorder.finish(record, false, "");
+
+		expect(recorder.snapshot()?.calls[0]?.arguments).toEqual({ text: "λ", items: [null, {}, 2] });
+		expect(recorder.snapshot()?.complete).toBe(true);
+	});
+
+	it("bounds persisted display labels without altering ordinary labels", () => {
+		const recorder = new NestedCallRecorder();
+		const label = "MCP · echo/$a/b [hash-17]";
+		const record = recorder.start(call("label", {}), label);
+		const longLabel = "x".repeat(NESTED_CALL_LIMITS.maxLabelChars + 100);
+		const longRecord = recorder.start(call("long-label", {}), longLabel);
+
+		expect(record?.label).toBe(label);
+		expect(longRecord?.label).toBe(longLabel.slice(0, NESTED_CALL_LIMITS.maxLabelChars));
+		expect(recorder.snapshot()?.calls.map((entry) => entry.label)).toEqual([
+			label,
+			longLabel.slice(0, NESTED_CALL_LIMITS.maxLabelChars),
+		]);
 	});
 });

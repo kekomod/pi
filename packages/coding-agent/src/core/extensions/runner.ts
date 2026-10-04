@@ -82,6 +82,7 @@ import type {
 	SessionShutdownEvent,
 	ToolCallEvent,
 	ToolCallEventResult,
+	ToolPresentationFactory,
 	ToolResultEvent,
 	ToolResultEventResult,
 	TurnEndEvent,
@@ -355,6 +356,7 @@ const noOpUIContext: ExtensionUIContext = {
 
 export class ExtensionRunner {
 	private extensions: Extension[];
+	private readonly toolPresentations: ReadonlyMap<string, ToolPresentationFactory>;
 	private runtime: ExtensionRuntime;
 	private uiContext: ExtensionUIContext;
 	private mode: ExtensionMode = "print";
@@ -399,6 +401,11 @@ export class ExtensionRunner {
 		modelRegistry: ModelRegistry,
 	) {
 		this.extensions = extensions;
+		const toolPresentations = new Map<string, ToolPresentationFactory>();
+		for (const extension of extensions) {
+			for (const [key, factory] of extension.toolPresentations) toolPresentations.set(key, factory);
+		}
+		this.toolPresentations = toolPresentations;
 		this.runtime = runtime;
 		this.uiContext = noOpUIContext;
 		this.cwd = cwd;
@@ -780,6 +787,11 @@ export class ExtensionRunner {
 			}
 		}
 		return undefined;
+	}
+
+	/** Get declared presentations; later extensions replace factories registered under the same key. */
+	getToolPresentations(): ReadonlyMap<string, ToolPresentationFactory> {
+		return this.toolPresentations;
 	}
 
 	getMarkdownTransformers(): MarkdownTransformer[] {
