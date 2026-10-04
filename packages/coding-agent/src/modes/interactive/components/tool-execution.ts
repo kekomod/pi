@@ -1,4 +1,4 @@
-import type { NestedToolCalls } from "@earendil-works/pi-ai";
+import type { JsonValue, NestedToolCalls } from "@earendil-works/pi-ai";
 import {
 	Box,
 	type Component,
@@ -145,6 +145,7 @@ export class ToolExecutionComponent extends Container implements ToolImageHost, 
 		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 		isError: boolean;
 		details?: any;
+		structuredContent?: JsonValue;
 		nestedCalls?: NestedToolCalls;
 	};
 	private nestedCalls?: NestedToolCalls;
@@ -407,6 +408,7 @@ export class ToolExecutionComponent extends Container implements ToolImageHost, 
 			content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 			details?: any;
 			isError: boolean;
+			structuredContent?: JsonValue;
 			nestedCalls?: NestedToolCalls;
 		},
 		isPartial = false,
@@ -639,6 +641,9 @@ export class ToolExecutionComponent extends Container implements ToolImageHost, 
 							{
 								content: this.result.content as any,
 								details: this.result.details,
+								...(this.result.structuredContent === undefined
+									? {}
+									: { structuredContent: this.result.structuredContent }),
 							},
 							{ expanded: this.expanded, isPartial: this.isPartial },
 							theme,

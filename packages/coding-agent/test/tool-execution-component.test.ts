@@ -136,6 +136,54 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain("custom result");
 	});
 
+	test("passes structured content to result renderers for live and replayed messages", () => {
+		const structuredContent = {
+			server: "docs",
+			uri: "docs://guide",
+			contents: [{ uri: "docs://guide", text: "Canonical resource text" }],
+		};
+		const observed: unknown[] = [];
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderResult: (result) => {
+				observed.push(result.structuredContent);
+				return new Text(JSON.stringify(result.structuredContent), 0, 0);
+			},
+		};
+		const live = new ToolExecutionComponent(
+			"custom_tool",
+			"live-structured",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		live.updateResult({ content: [], isError: false, structuredContent });
+		expect(stripAnsi(live.render(120).join("\n"))).toContain("Canonical resource text");
+
+		const replayed = new ToolExecutionComponent(
+			"custom_tool",
+			"replayed-structured",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		const replayedMessage = {
+			role: "toolResult" as const,
+			toolCallId: "replayed-structured",
+			toolName: "custom_tool",
+			content: [],
+			structuredContent,
+			isError: false,
+		};
+		replayed.updateResult(replayedMessage);
+		expect(stripAnsi(replayed.render(120).join("\n"))).toContain("Canonical resource text");
+		expect(observed).toEqual([structuredContent, structuredContent]);
+	});
+
 	test("passes bounded nested calls to live and replayed renderers and preserves row state on rebind", () => {
 		const nestedCalls = {
 			calls: [
