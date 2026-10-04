@@ -39,7 +39,9 @@ type LoadedResourcesContext = {
 };
 
 type RebindContext = {
+	session: { extensionRunner: unknown };
 	unsubscribe?: () => void;
+	initializeInteractivePresentations: (runner: unknown) => void;
 	applyRuntimeSettings: () => void;
 	renderCurrentSessionState: () => void;
 	bindCurrentSessionExtensions: () => Promise<void>;
@@ -51,6 +53,7 @@ type RebindContext = {
 
 type ReloadCommandContext = {
 	hideThinkingBlock: boolean;
+	initializeInteractivePresentations: (runner: unknown) => void;
 	session: {
 		isStreaming: boolean;
 		isCompacting: boolean;
@@ -120,6 +123,7 @@ function createReloadCommandContext(overrides: ReloadCommandContextOverrides = {
 	const editor = overrides.editor ?? {};
 	return {
 		hideThinkingBlock: overrides.hideThinkingBlock ?? false,
+		initializeInteractivePresentations: overrides.initializeInteractivePresentations ?? (() => {}),
 		session: {
 			isStreaming: false,
 			isCompacting: false,
@@ -251,6 +255,8 @@ describe("regression #5943: session_start transient UI", () => {
 
 		try {
 			const context: RebindContext = {
+				session: { extensionRunner: {} },
+				initializeInteractivePresentations: () => events.push("setup"),
 				applyRuntimeSettings: () => events.push("apply"),
 				renderCurrentSessionState: () => events.push("render"),
 				bindCurrentSessionExtensions: async () => {
@@ -268,7 +274,7 @@ describe("regression #5943: session_start transient UI", () => {
 
 			await interactiveModePrototype.rebindCurrentSession.call(context, { renderBeforeBind: true });
 
-			expect(events).toEqual(["apply", "render", "subscribe", "bind", "notify:Hello Error"]);
+			expect(events).toEqual(["apply", "setup", "render", "subscribe", "bind", "notify:Hello Error"]);
 		} finally {
 			harness.cleanup();
 		}
@@ -292,6 +298,8 @@ describe("regression #5943: session_start transient UI", () => {
 
 		try {
 			const context: RebindContext = {
+				session: { extensionRunner: {} },
+				initializeInteractivePresentations: () => events.push("setup"),
 				applyRuntimeSettings: () => {},
 				renderCurrentSessionState: () => events.push("render"),
 				bindCurrentSessionExtensions: async () => {
@@ -318,6 +326,7 @@ describe("regression #5943: session_start transient UI", () => {
 			await interactiveModePrototype.rebindCurrentSession.call(context, { renderBeforeBind: true });
 
 			expect(events).toEqual([
+				"setup",
 				"render",
 				"subscribe",
 				"bind",
@@ -344,6 +353,8 @@ describe("regression #5943: session_start transient UI", () => {
 
 		try {
 			const context: RebindContext = {
+				session: { extensionRunner: {} },
+				initializeInteractivePresentations: () => events.push("setup"),
 				applyRuntimeSettings: () => {},
 				renderCurrentSessionState: () => events.push("render"),
 				bindCurrentSessionExtensions: async () => {
@@ -370,7 +381,7 @@ describe("regression #5943: session_start transient UI", () => {
 			await interactiveModePrototype.rebindCurrentSession.call(context, { renderBeforeBind: true });
 			await harness.session.agent.waitForIdle();
 
-			expect(events.slice(0, 3)).toEqual(["render", "subscribe", "bind"]);
+			expect(events.slice(0, 4)).toEqual(["setup", "render", "subscribe", "bind"]);
 			expect(events).toContain("message_start:user:user from start");
 			expect(events).toContain("message_end:user:user from start");
 			expect(events).toContain("message_end:assistant:assistant from start");
@@ -417,6 +428,7 @@ describe("regression #5943: session_start transient UI", () => {
 		const events: string[] = [];
 		let context: ReloadCommandContext;
 		context = createReloadCommandContext({
+			initializeInteractivePresentations: () => events.push("setup"),
 			settingsManager: { getHideThinkingBlock: () => true },
 			session: {
 				reload: async (options) => {
@@ -433,7 +445,7 @@ describe("regression #5943: session_start transient UI", () => {
 		await interactiveModePrototype.handleReloadCommand.call(context);
 
 		expect(context.hideThinkingBlock).toBe(true);
-		expect(events).toEqual(["reload", "rebuild:true", "start:true"]);
+		expect(events).toEqual(["reload", "setup", "rebuild:true", "start:true"]);
 	});
 
 	it("keeps the reload blocker focused until async reload completes", async () => {

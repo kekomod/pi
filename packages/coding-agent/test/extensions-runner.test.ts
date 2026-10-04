@@ -18,9 +18,11 @@ import {
 import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
 import type {
 	ExtensionActions,
+	ExtensionAPI,
 	ExtensionContextActions,
 	ExtensionFactory,
 	ExtensionUIContext,
+	InteractivePresentationContext,
 	ProviderConfig,
 } from "../src/core/extensions/types.ts";
 import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
@@ -739,25 +741,80 @@ describe("ExtensionRunner", () => {
 			expect(missing).toBeUndefined();
 		});
 
-		it("exposes declarative tool presentations before session startup", async () => {
+		it("installs factory-time interactive presentations once with keyed replacement", async () => {
 			const extCode = `
 				export default function(pi) {
-					pi.registerToolPresentation("codemode", () => ({ renderShell: "default" }));
-					pi.registerToolPresentation("codemode", () => ({ renderCall: () => null }));
-					pi.registerToolPresentation("*", () => ({ renderShell: "self" }));
+					pi.registerInteractivePresentation("shared", ({ui}) => {
+						ui.setToolPresentation?.("discarded", () => undefined);
+					});
+					pi.registerInteractivePresentation("shared", ({ui}) => {
+						ui.setMessagePresentation?.("shared", () => {});
+					});
+					pi.registerInteractivePresentation("images", ({ui}) => {
+						ui.setToolImagePresentation?.("*", { spacingRows: 0 });
+					});
 				}
 			`;
-			fs.writeFileSync(path.join(extensionsDir, "tool-presentation.ts"), extCode);
+			fs.writeFileSync(path.join(extensionsDir, "interactive-presentation.ts"), extCode);
 
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const presentations = runner.getToolPresentations();
+			const calls: string[] = [];
+			const context = {
+				cwd: tempDir,
+				sessionManager,
+				ui: {
+					setToolPresentation: (key: string) => calls.push(`tool:${key}`),
+					setMessagePresentation: (key: string) => calls.push(`message:${key}`),
+					setToolImagePresentation: (name: string) => calls.push(`image:${name}`),
+				},
+			} as unknown as InteractivePresentationContext;
 
-			expect([...presentations.keys()]).toEqual(["codemode", "*"]);
-			expect(presentations.get("codemode")?.({ name: "codemode", renderers: {} })).toMatchObject({
-				renderCall: expect.any(Function),
-			});
-			expect(presentations.get("*")?.({ name: "unknown", renderers: {} })).toEqual({ renderShell: "self" });
+			runner.initializeInteractivePresentations(context);
+			runner.initializeInteractivePresentations(context);
+
+			expect(calls).toEqual(["message:shared", "image:*"]);
+		});
+
+		it("rejects interactive presentation registration after the extension factory", async () => {
+			let capturedApi: ExtensionAPI | undefined;
+			await loadExtensionFromFactory(
+				(pi) => {
+					capturedApi = pi;
+					pi.registerInteractivePresentation("initial", () => {});
+				},
+				tempDir,
+				createEventBus(),
+				createExtensionRuntime(),
+			);
+
+			expect(() => capturedApi?.registerInteractivePresentation("late", () => {})).toThrow(
+				"must be registered during the extension factory",
+			);
+		});
+
+		it("keeps the shutdown marker active across awaited handlers", async () => {
+			const observations: string[] = [];
+			const runtime = createExtensionRuntime();
+			let runner: ExtensionRunner;
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("session_shutdown", async () => {
+						observations.push(`start:${runner.isEmittingSessionShutdown}`);
+						await Promise.resolve();
+						observations.push(`end:${runner.isEmittingSessionShutdown}`);
+					});
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+			);
+			runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+
+			await runner.emit({ type: "session_shutdown", reason: "new" });
+
+			expect(observations).toEqual(["start:true", "end:true"]);
+			expect(runner.isEmittingSessionShutdown).toBe(false);
 		});
 
 		it("gets entry renderer by type", async () => {

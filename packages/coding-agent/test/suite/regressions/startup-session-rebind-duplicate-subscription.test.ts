@@ -3,6 +3,7 @@ import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode
 
 type RebindContext = {
 	session: object;
+	initializeInteractivePresentations: (runner: unknown) => void;
 	unsubscribe?: () => void;
 	applyRuntimeSettings: () => void;
 	renderCurrentSessionState: () => void;
@@ -21,8 +22,8 @@ const interactiveModePrototype = InteractiveMode.prototype as unknown as Interac
 
 describe("overlapping startup and replacement session rebinds", () => {
 	it("does not subscribe from the stale startup rebind", async () => {
-		const startupSession = {};
-		const replacementSession = {};
+		const startupSession = { extensionRunner: {} };
+		const replacementSession = { extensionRunner: {} };
 		let resolveStartupBind!: () => void;
 		let resolveReplacementBind!: () => void;
 
@@ -39,6 +40,7 @@ describe("overlapping startup and replacement session rebinds", () => {
 
 		const context: RebindContext = {
 			session: startupSession,
+			initializeInteractivePresentations: () => {},
 			applyRuntimeSettings: () => {},
 			renderCurrentSessionState: () => {},
 			bindCurrentSessionExtensions: () => {

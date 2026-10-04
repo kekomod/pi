@@ -86,6 +86,8 @@ import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
+	InteractivePresentationContext,
+	InteractivePresentationUI,
 	MarkdownTransformer,
 	MessageEntryAssociation,
 	MessagePresentationFactory,
@@ -602,11 +604,15 @@ export class InteractiveMode {
 	private statusFilters = new Map<string, (message: string) => boolean>();
 	private toolImagePresentations = new Map<string, ToolImagePresentation>();
 	private toolPresentationFactories = new Map<string, ToolPresentationFactory>();
+	private interactivePresentationRunner: ExtensionRunner | undefined;
+	private interactivePresentationSetupDepth = 0;
 	private nestedCallRecorders = new Map<string, NestedCallRecorder>();
 	private nestedToolCallRoots = new Map<string, string>();
 	private nestedToolCallRecords = new Map<string, NestedToolCallRecord>();
 	private nestedCallIdsByRoot = new Map<string, Set<string>>();
 	private readonly toolGroupCoordinator = new ToolGroupCoordinator();
+	private pendingToolGroupPresentation: ToolGroupPresentation | undefined;
+	private toolGroupPresentationPending = false;
 	private streamingAssistantVisible = false;
 	private queuedMessagePresentation: QueuedMessagePresentationFactory | undefined;
 
@@ -2127,6 +2133,7 @@ export class InteractiveMode {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
 		this.applyRuntimeSettings();
+		this.initializeInteractivePresentations(session.extensionRunner);
 
 		if (options.renderBeforeBind) {
 			this.renderCurrentSessionState();
@@ -2259,9 +2266,6 @@ export class InteractiveMode {
 				// A presentation extension must not prevent the native tool row from rendering.
 			}
 		};
-		for (const factory of this.session.extensionRunner.getToolPresentations().values()) {
-			applyFactory(factory);
-		}
 		for (const factory of this.toolPresentationFactories.values()) {
 			applyFactory(factory);
 		}
@@ -2418,7 +2422,9 @@ export class InteractiveMode {
 	}
 
 	private setHiddenThinkingLabel(label?: string): void {
+		if (this.isExtensionSessionShuttingDown()) return;
 		this.hiddenThinkingLabel = label ?? this.defaultHiddenThinkingLabel;
+		if (!this.shouldRefreshInteractivePresentations()) return;
 		for (const child of this.chatContainer.children) {
 			if (child instanceof AssistantMessageComponent) {
 				child.setHiddenThinkingLabel(this.hiddenThinkingLabel);
@@ -2499,13 +2505,7 @@ export class InteractiveMode {
 		}
 		this.ui.hideOverlay();
 		this.clearExtensionTerminalInputListeners();
-		this.messagePresentationFactories.clear();
-		this.messageEntryAssociations.clear();
-		this.statusFilters.clear();
-		this.toolImagePresentations.clear();
-		this.toolPresentationFactories.clear();
 		this.clearNestedToolPresentationState();
-		this.setToolGroupPresentation(undefined);
 		this.setExtensionFooter(undefined);
 		this.setExtensionHeader(undefined);
 		this.clearExtensionWidgets();
@@ -2524,7 +2524,6 @@ export class InteractiveMode {
 				`${this.defaultWorkingMessage} (${keyText("app.interrupt")} to interrupt)`,
 			);
 		}
-		this.setHiddenThinkingLabel();
 	}
 
 	// Maximum total widget lines to prevent viewport overflow
@@ -2686,25 +2685,30 @@ export class InteractiveMode {
 	}
 
 	private setMessagePresentation(key: string, factory: MessagePresentationFactory | undefined): void {
+		if (this.isExtensionSessionShuttingDown()) return;
 		if (factory) this.messagePresentationFactories.set(key, factory);
 		else this.messagePresentationFactories.delete(key);
-		if (this.isInitialized) this.rebuildChatFromMessages();
+		if (this.isInitialized && this.shouldRefreshInteractivePresentations()) this.rebuildChatFromMessages();
 	}
 
 	private setMessageEntryAssociation(key: string, association: MessageEntryAssociation | undefined): void {
+		if (this.isExtensionSessionShuttingDown()) return;
 		if (association) this.messageEntryAssociations.set(key, association);
 		else this.messageEntryAssociations.delete(key);
-		if (this.isInitialized) this.rebuildChatFromMessages();
+		if (this.isInitialized && this.shouldRefreshInteractivePresentations()) this.rebuildChatFromMessages();
 	}
 
 	private setStatusFilter(key: string, filter: ((message: string) => boolean) | undefined): void {
+		if (this.isExtensionSessionShuttingDown()) return;
 		if (filter) this.statusFilters.set(key, filter);
 		else this.statusFilters.delete(key);
 	}
 
 	private setToolImagePresentation(toolName: string, presentation: ToolImagePresentation | undefined): void {
+		if (this.isExtensionSessionShuttingDown()) return;
 		if (presentation) this.toolImagePresentations.set(toolName, presentation);
 		else this.toolImagePresentations.delete(toolName);
+		if (!this.shouldRefreshInteractivePresentations()) return;
 		for (const component of this.getToolExecutionComponents()) {
 			if (toolName === "*" || component.getToolName() === toolName) {
 				component.setImagePresentation(this.resolveToolImagePresentation(component.getToolName()));
@@ -2717,8 +2721,10 @@ export class InteractiveMode {
 	}
 
 	private setToolPresentation(key: string, factory: ToolPresentationFactory | undefined): void {
+		if (this.isExtensionSessionShuttingDown()) return;
 		if (factory) this.toolPresentationFactories.set(key, factory);
 		else this.toolPresentationFactories.delete(key);
+		if (!this.shouldRefreshInteractivePresentations()) return;
 		for (const component of this.getToolExecutionComponents()) {
 			component.setToolRenderers(this.getRegisteredToolDefinition(component.getToolName()));
 		}
@@ -2817,6 +2823,12 @@ export class InteractiveMode {
 	}
 
 	private setToolGroupPresentation(presentation: ToolGroupPresentation | undefined): void {
+		if (this.isExtensionSessionShuttingDown()) return;
+		if (!this.shouldRefreshInteractivePresentations()) {
+			this.pendingToolGroupPresentation = presentation;
+			this.toolGroupPresentationPending = true;
+			return;
+		}
 		this.toolGroupCoordinator.setPresentation(presentation);
 		if (this.isInitialized && presentation) this.rebuildToolGroupMemberships();
 	}
@@ -2856,8 +2868,59 @@ export class InteractiveMode {
 	}
 
 	private setQueuedMessagePresentation(factory: QueuedMessagePresentationFactory | undefined): void {
+		if (this.isExtensionSessionShuttingDown()) return;
 		this.queuedMessagePresentation = factory;
-		if (this.isInitialized) this.updatePendingMessagesDisplay();
+		if (this.isInitialized && this.shouldRefreshInteractivePresentations()) this.updatePendingMessagesDisplay();
+	}
+
+	private shouldRefreshInteractivePresentations(): boolean {
+		return this.interactivePresentationSetupDepth === 0 && !this.isExtensionSessionShuttingDown();
+	}
+
+	private isExtensionSessionShuttingDown(): boolean {
+		return this.session?.extensionRunner?.isEmittingSessionShutdown === true;
+	}
+
+	private clearInteractivePresentationState(): void {
+		this.messagePresentationFactories.clear();
+		this.messageEntryAssociations.clear();
+		this.statusFilters.clear();
+		this.toolImagePresentations.clear();
+		this.toolPresentationFactories.clear();
+		this.pendingToolGroupPresentation = undefined;
+		this.toolGroupPresentationPending = true;
+		this.queuedMessagePresentation = undefined;
+		this.hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
+	}
+
+	private createInteractivePresentationContext(): InteractivePresentationContext {
+		const extensionUI = this.createExtensionUIContext();
+		const ui: InteractivePresentationUI = {
+			setMessagePresentation: extensionUI.setMessagePresentation,
+			setMessageEntryAssociation: extensionUI.setMessageEntryAssociation,
+			setStatusFilter: extensionUI.setStatusFilter,
+			setToolImagePresentation: extensionUI.setToolImagePresentation,
+			setToolPresentation: extensionUI.setToolPresentation,
+			setToolGroupPresentation: extensionUI.setToolGroupPresentation,
+			setQueuedMessagePresentation: extensionUI.setQueuedMessagePresentation,
+			setHiddenThinkingLabel: extensionUI.setHiddenThinkingLabel,
+			get theme() {
+				return extensionUI.theme;
+			},
+		};
+		return { ui, sessionManager: this.sessionManager, cwd: this.sessionManager.getCwd() };
+	}
+
+	private initializeInteractivePresentations(runner: ExtensionRunner): void {
+		if (runner === this.interactivePresentationRunner) return;
+		this.interactivePresentationSetupDepth++;
+		try {
+			this.clearInteractivePresentationState();
+			runner.initializeInteractivePresentations(this.createInteractivePresentationContext());
+			this.interactivePresentationRunner = runner;
+		} finally {
+			this.interactivePresentationSetupDepth--;
+		}
 	}
 
 	private createExtensionUIContext(): ExtensionUIContext {
@@ -4251,6 +4314,10 @@ export class InteractiveMode {
 	): void {
 		this.pendingTools.clear();
 		this.toolGroupCoordinator.reset();
+		if (this.toolGroupPresentationPending) {
+			this.toolGroupCoordinator.setPresentation(this.pendingToolGroupPresentation);
+			this.toolGroupPresentationPending = false;
+		}
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 		// Cache misses are not persisted, unlike successful cache-warming usage.
 		// Re-derive them and inject them after the assistant messages that paid for them.
@@ -6796,6 +6863,7 @@ export class InteractiveMode {
 			if (chatRestoredBeforeSessionStart) {
 				return;
 			}
+			this.initializeInteractivePresentations(this.session.extensionRunner);
 			this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 			this.outputPad = this.settingsManager.getOutputPad();
 			this.rebuildChatFromMessages();

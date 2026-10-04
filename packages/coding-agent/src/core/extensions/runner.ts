@@ -59,6 +59,8 @@ import type {
 	InputEvent,
 	InputEventResult,
 	InputSource,
+	InteractivePresentationContext,
+	InteractivePresentationSetup,
 	LoadExtensionsResult,
 	MarkdownTransformer,
 	MessageEndEvent,
@@ -82,7 +84,6 @@ import type {
 	SessionShutdownEvent,
 	ToolCallEvent,
 	ToolCallEventResult,
-	ToolPresentationFactory,
 	ToolResultEvent,
 	ToolResultEventResult,
 	TurnEndEvent,
@@ -356,7 +357,13 @@ const noOpUIContext: ExtensionUIContext = {
 
 export class ExtensionRunner {
 	private extensions: Extension[];
-	private readonly toolPresentations: ReadonlyMap<string, ToolPresentationFactory>;
+	private readonly interactivePresentations: ReadonlyMap<
+		string,
+		{ setup: InteractivePresentationSetup; extensionPath: string }
+	>;
+	private interactivePresentationsInitialized = false;
+	private pendingInteractivePresentationErrors: ExtensionError[] = [];
+	private sessionShutdownDepth = 0;
 	private runtime: ExtensionRuntime;
 	private uiContext: ExtensionUIContext;
 	private mode: ExtensionMode = "print";
@@ -401,11 +408,16 @@ export class ExtensionRunner {
 		modelRegistry: ModelRegistry,
 	) {
 		this.extensions = extensions;
-		const toolPresentations = new Map<string, ToolPresentationFactory>();
+		const interactivePresentations = new Map<
+			string,
+			{ setup: InteractivePresentationSetup; extensionPath: string }
+		>();
 		for (const extension of extensions) {
-			for (const [key, factory] of extension.toolPresentations) toolPresentations.set(key, factory);
+			for (const [key, setup] of extension.interactivePresentations) {
+				interactivePresentations.set(key, { setup, extensionPath: extension.path });
+			}
 		}
-		this.toolPresentations = toolPresentations;
+		this.interactivePresentations = interactivePresentations;
 		this.runtime = runtime;
 		this.uiContext = noOpUIContext;
 		this.cwd = cwd;
@@ -743,6 +755,7 @@ export class ExtensionRunner {
 
 	onError(listener: ExtensionErrorListener): () => void {
 		this.errorListeners.add(listener);
+		for (const error of this.pendingInteractivePresentationErrors.splice(0)) listener(error);
 		return () => this.errorListeners.delete(listener);
 	}
 
@@ -789,9 +802,33 @@ export class ExtensionRunner {
 		return undefined;
 	}
 
-	/** Get declared presentations; later extensions replace factories registered under the same key. */
-	getToolPresentations(): ReadonlyMap<string, ToolPresentationFactory> {
-		return this.toolPresentations;
+	/** Install factory-time interactive declarations once before this runner's transcript is rendered. */
+	initializeInteractivePresentations(context: InteractivePresentationContext): void {
+		if (this.interactivePresentationsInitialized) return;
+		this.interactivePresentationsInitialized = true;
+		for (const { setup, extensionPath } of this.interactivePresentations.values()) {
+			try {
+				const result = (setup as (context: InteractivePresentationContext) => unknown)(context);
+				if (typeof result === "object" && result !== null && "then" in result) {
+					void Promise.resolve(result).catch(() => {});
+					throw new Error("Interactive presentation setup must be synchronous");
+				}
+			} catch (error) {
+				const presentationError: ExtensionError = {
+					extensionPath,
+					event: "interactive_presentation",
+					error: error instanceof Error ? error.message : String(error),
+					stack: error instanceof Error ? error.stack : undefined,
+				};
+				if (this.errorListeners.size === 0) this.pendingInteractivePresentationErrors.push(presentationError);
+				else this.emitError(presentationError);
+			}
+		}
+	}
+
+	/** True while extension shutdown handlers are running and transcript presentation refresh is deferred. */
+	get isEmittingSessionShutdown(): boolean {
+		return this.sessionShutdownDepth > 0;
 	}
 
 	getMarkdownTransformers(): MarkdownTransformer[] {
@@ -1091,34 +1128,40 @@ export class ExtensionRunner {
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
-		const ctx = this.createContext();
-		let result: SessionBeforeEventResult | undefined;
+		const isSessionShutdown = event.type === "session_shutdown";
+		if (isSessionShutdown) this.sessionShutdownDepth++;
+		try {
+			const ctx = this.createContext();
+			let result: SessionBeforeEventResult | undefined;
 
-		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {
-			for (const handler of handlers) {
-				try {
-					const handlerResult = await handler(event, ctx);
+			for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {
+				for (const handler of handlers) {
+					try {
+						const handlerResult = await handler(event, ctx);
 
-					if (this.isSessionBeforeEvent(event) && handlerResult) {
-						result = handlerResult as SessionBeforeEventResult;
-						if (result.cancel) {
-							return result as RunnerEmitResult<TEvent>;
+						if (this.isSessionBeforeEvent(event) && handlerResult) {
+							result = handlerResult as SessionBeforeEventResult;
+							if (result.cancel) {
+								return result as RunnerEmitResult<TEvent>;
+							}
 						}
+					} catch (err) {
+						const message = err instanceof Error ? err.message : String(err);
+						const stack = err instanceof Error ? err.stack : undefined;
+						this.emitError({
+							extensionPath: ext.path,
+							event: event.type,
+							error: message,
+							stack,
+						});
 					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: event.type,
-						error: message,
-						stack,
-					});
 				}
 			}
-		}
 
-		return result as RunnerEmitResult<TEvent>;
+			return result as RunnerEmitResult<TEvent>;
+		} finally {
+			if (isSessionShutdown) this.sessionShutdownDepth--;
+		}
 	}
 
 	/** Returns the event's own action unless a handler overrides it; the last override wins. */

@@ -550,6 +550,33 @@ export interface ExtensionUIContext {
 	setQueuedMessagePresentation?: (factory: QueuedMessagePresentationFactory | undefined) => void;
 }
 
+/**
+ * The UI setters available to presentation setup declared by an extension factory.
+ * This intentionally excludes interactive prompts and actions.
+ */
+export type InteractivePresentationUI = Pick<
+	ExtensionUIContext,
+	| "setMessagePresentation"
+	| "setMessageEntryAssociation"
+	| "setStatusFilter"
+	| "setToolImagePresentation"
+	| "setToolPresentation"
+	| "setToolGroupPresentation"
+	| "setQueuedMessagePresentation"
+	| "setHiddenThinkingLabel"
+	| "theme"
+>;
+
+/** Read-only host context supplied when interactive presentations are installed. */
+export interface InteractivePresentationContext {
+	readonly ui: InteractivePresentationUI;
+	readonly sessionManager: ReadonlySessionManager;
+	readonly cwd: string;
+}
+
+/** Synchronous setup for an interactive presentation; registered at extension factory time. */
+export type InteractivePresentationSetup = (context: InteractivePresentationContext) => void;
+
 // ============================================================================
 // Extension Context
 // ============================================================================
@@ -1935,8 +1962,12 @@ export interface ExtensionAPI {
 	/** Register a custom renderer for CustomMessageEntry. */
 	registerMessageRenderer<T = unknown>(customType: string, renderer: MessageRenderer<T>): void;
 
-	/** Register a tool-call presentation before interactive transcript rendering begins. */
-	registerToolPresentation(key: string, factory: ToolPresentationFactory): void;
+	/**
+	 * Register synchronous interactive presentation setup at extension factory time.
+	 * Pi runs it once for each interactive runner before building that runner's transcript.
+	 * The setup can install presentation setters only; it has no prompts or execution actions.
+	 */
+	registerInteractivePresentation(key: string, setup: InteractivePresentationSetup): void;
 
 	/** Register a transformer for user and assistant Markdown before Pi renders it in the interactive transcript. */
 	registerMarkdownTransformer(transformer: MarkdownTransformer): void;
@@ -2519,7 +2550,7 @@ export interface Extension {
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool>;
 	messageRenderers: Map<string, MessageRenderer>;
-	toolPresentations: Map<string, ToolPresentationFactory>;
+	interactivePresentations: Map<string, InteractivePresentationSetup>;
 	markdownTransformer?: MarkdownTransformer;
 	entryRenderers?: Map<string, EntryRenderer>;
 	commands: Map<string, RegisteredCommand>;

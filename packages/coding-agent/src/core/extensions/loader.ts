@@ -28,13 +28,13 @@ import type {
 	ExtensionFactory,
 	ExtensionRuntime,
 	ExtensionVirtualModel,
+	InteractivePresentationSetup,
 	LoadExtensionsResult,
 	MarkdownTransformer,
 	MessageRenderer,
 	ProviderConfig,
 	RegisteredCommand,
 	ToolDefinition,
-	ToolPresentationFactory,
 } from "./types.ts";
 
 const require = createRequire(import.meta.url);
@@ -272,6 +272,12 @@ function createExtensionAPI(
 		}
 		runtime.assertActive();
 	};
+	const assertLoading = (registration: string) => {
+		assertActive();
+		if (state !== "loading") {
+			throw new Error(`${registration} must be registered during the extension factory.`);
+		}
+	};
 	const applyRuntimeChange = (change: () => void) => {
 		if (state === "loading") pendingRuntimeChanges.push(change);
 		else change();
@@ -368,9 +374,9 @@ function createExtensionAPI(
 			extension.messageRenderers.set(customType, renderer as MessageRenderer);
 		},
 
-		registerToolPresentation(key: string, factory: ToolPresentationFactory): void {
-			assertActive();
-			extension.toolPresentations.set(key, factory);
+		registerInteractivePresentation(key: string, setup: InteractivePresentationSetup): void {
+			assertLoading("registerInteractivePresentation()");
+			extension.interactivePresentations.set(key, setup);
 		},
 
 		registerMarkdownTransformer(transformer: MarkdownTransformer): void {
@@ -658,7 +664,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		handlers: new Map(),
 		tools: new Map(),
 		messageRenderers: new Map(),
-		toolPresentations: new Map(),
+		interactivePresentations: new Map(),
 		entryRenderers: new Map(),
 		commands: new Map(),
 		flags: new Map(),
